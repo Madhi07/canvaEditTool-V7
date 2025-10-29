@@ -50,6 +50,7 @@ export default function Timeline({
     setDragType(type);
     setDragClipId(clip.id);
     setDragStartX(e.clientX);
+    
 
     if (type === "move") {
       setDragStartValue(clip.startTime);

@@ -8,6 +8,109 @@ import {
   getImageThumbnail,
 } from "../utils/thumbnailExtractor";
 
+// Enhanced audio element management with better sync
+class AudioSyncManager {
+  constructor() {
+    this.audioElements = new Map();
+    this.masterClock = 0;
+    this.isPlaying = false;
+    this.lastUpdateTime = 0;
+    this.syncTolerance = 0.1; // 100ms tolerance
+  }
+
+  createAudioElement(clipId, url) {
+    if (this.audioElements.has(clipId)) {
+      return this.audioElements.get(clipId);
+    }
+
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.crossOrigin = "anonymous";
+    audio.src = url;
+    
+    // Store metadata
+    const elementData = {
+      audio,
+      clipId,
+      url,
+      isActive: false,
+      lastSyncTime: 0,
+      syncOffset: 0
+    };
+
+    this.audioElements.set(clipId, elementData);
+    return elementData;
+  }
+
+  // Synchronize audio with master timeline
+  syncAudio(clipId, timelineTime, isPlaying, clipStartTime, clipTrimStart) {
+    const elementData = this.audioElements.get(clipId);
+    if (!elementData) return;
+
+    const { audio } = elementData;
+    const relativeTime = Math.max(0, timelineTime - clipStartTime + clipTrimStart);
+    const isActive = timelineTime >= clipStartTime && timelineTime < (clipStartTime + audio.duration);
+
+    elementData.isActive = isActive;
+
+    if (isActive) {
+      // Calculate desired audio position
+      const desiredTime = relativeTime;
+      const currentTime = audio.currentTime;
+      const timeDiff = Math.abs(desiredTime - currentTime);
+
+      // Sync if significantly out of sync
+      if (timeDiff > this.syncTolerance) {
+        audio.currentTime = Math.max(0, Math.min(desiredTime, audio.duration - 0.1));
+        elementData.lastSyncTime = timelineTime;
+      }
+
+      // Play/pause based on global state
+      if (isPlaying && audio.paused) {
+        audio.play().catch((e) => {
+          console.warn(`Audio play failed for clip ${clipId}:`, e);
+        });
+      } else if (!isPlaying && !audio.paused) {
+        audio.pause();
+      }
+    } else {
+      // Not active, ensure paused
+      if (!audio.paused) {
+        audio.pause();
+      }
+    }
+  }
+
+  // Cleanup removed clips
+  cleanupClips(activeClipIds) {
+    for (const [clipId, elementData] of this.audioElements.entries()) {
+      if (!activeClipIds.has(clipId)) {
+        elementData.audio.pause();
+        elementData.audio.src = "";
+        this.audioElements.delete(clipId);
+      }
+    }
+  }
+
+  // Get all active audio clips at current time
+  getActiveAudioClips(clips, timelineTime) {
+    return clips.filter(
+      clip => clip.type === "audio" && 
+      timelineTime >= clip.startTime && 
+      timelineTime < clip.endTime
+    );
+  }
+
+  // Stop all audio
+  stopAll() {
+    this.audioElements.forEach(elementData => {
+      if (!elementData.audio.paused) {
+        elementData.audio.pause();
+      }
+    });
+  }
+}
+
 export default function Home() {
   const [clips, setClips] = useState([
     {
@@ -34,13 +137,13 @@ export default function Home() {
   const [videoZoom, setVideoZoom] = useState(1);
 
   const clipsRef = useRef(clips);
-  const audioElementsRef = useRef({});
+  const audioSyncManager = useRef(new AudioSyncManager());
 
   useEffect(() => {
     clipsRef.current = clips;
   }, [clips]);
 
-  // Load default video metadata + thumbnail (Unchanged)
+  // Load default video metadata + thumbnail
   useEffect(() => {
     const defaultClip = clips.find((c) => c.id === "default-clip");
     if (!defaultClip) return;
@@ -86,8 +189,7 @@ export default function Home() {
     loadDefaultMetadata();
   }, []);
 
-  // Auto-calculate total timeline duration (Unchanged)
-  // ✅ Only calculate totalDuration from video & image clips
+  // Auto-calculate total timeline duration
   useEffect(() => {
     if (!clips.length) return;
 
@@ -100,10 +202,10 @@ export default function Home() {
         ? Math.max(...visualClips.map((c) => c.endTime))
         : 0;
 
-    setTotalDuration(maxVisualEnd); // 👈 Only visual clips count
+    setTotalDuration(maxVisualEnd);
   }, [clips]);
 
-  // ✅ [FIX] handleClipEnd now only advances between VISUAL clips
+  // Enhanced clip end handler with better sync
   const handleClipEnd = useCallback((endedClipId) => {
     const visualClips = clipsRef.current
       .filter((c) => c.type === "video" || c.type === "image")
@@ -126,10 +228,11 @@ export default function Home() {
     } else {
       // No more visual clips — stop playback
       setIsPlaying(false);
+      audioSyncManager.current.stopAll();
     }
   }, []);
 
-  // Upload handler (Unchanged)
+  // Enhanced media upload handler
   const handleMediaUpload = async (file, type) => {
     const url = URL.createObjectURL(file);
 
@@ -165,14 +268,14 @@ export default function Home() {
           ? Math.max(...audioClips.map((c) => c.endTime))
           : 0;
 
-      // ✅ Find the lowest free audio track (starting from 0)
+      // Find the lowest free audio track
       const usedTracks = new Set(audioClips.map((c) => c.track));
       let nextTrack = 0;
       while (usedTracks.has(nextTrack)) {
         nextTrack++;
       }
 
-      track = nextTrack; // e.g., first audio clip → track 0
+      track = nextTrack;
     }
 
     let thumbnail = null;
@@ -277,7 +380,7 @@ export default function Home() {
     setClips(fixed);
   };
 
-  // Timeline & Player handlers (Unchanged)
+  // Timeline & Player handlers
   const handleClipUpdate = (clipId, updates) =>
     setClips((prev) =>
       prev.map((c) => (c.id === clipId ? { ...c, ...updates } : c))
@@ -287,18 +390,19 @@ export default function Home() {
     setSelectedClipId(clip.id);
     setCurrentTime(clip.startTime);
     setIsPlaying(false);
+    audioSyncManager.current.stopAll();
   };
 
   const handleSeek = (time) => {
     setCurrentTime(time);
     setIsPlaying(false);
+    audioSyncManager.current.stopAll();
   };
 
   const handlePlayPause = () => setIsPlaying((prev) => !prev);
 
-  // ✅ [FIX] handleTimeUpdate now uses the clipId from the player
+  // Enhanced time update handler with better sync
   const handleTimeUpdate = (timeSec, clipId) => {
-    // `clipId` is the ID of the clip *currently in the player*
     const currentClip = clipsRef.current.find((c) => c.id === clipId);
     if (!currentClip || !isPlaying) return;
 
@@ -315,26 +419,22 @@ export default function Home() {
     }
   };
 
-  // ✅ [FIX] getCurrentClip is now based on currentTime, NOT selectedClipId
+  // Enhanced current clip getter
   const getCurrentClip = useCallback(() => {
     const visualClips = clips
       .filter((c) => c.type === "video" || c.type === "image")
-      .sort((a, b) => a.startTime - b.startTime); // Ensure order for logic below
+      .sort((a, b) => a.startTime - b.startTime);
 
-    // 1. Find the clip that is *currently* active
     let activeClip = visualClips.find(
       (c) => currentTime >= c.startTime && currentTime < c.endTime
     );
 
-    // 2. If at the end, show the last frame of the last clip
     if (!activeClip && currentTime >= totalDuration && visualClips.length > 0) {
       activeClip = visualClips[visualClips.length - 1];
     }
 
-    // 3. If no visual clips exist, or we're at the very start, return null
     if (!activeClip) return null;
 
-    // Calculate relative time.
     const relativeTime = Math.max(
       0,
       currentTime - activeClip.startTime + activeClip.trimStart
@@ -354,14 +454,14 @@ export default function Home() {
     };
   }, [currentTime, clips, totalDuration]);
 
-  // Ensure at least one clip selected (Unchanged)
+  // Ensure at least one clip selected
   useEffect(() => {
     if (clips.length && !selectedClipId) {
       setSelectedClipId(clips[0].id);
     }
   }, [clips, selectedClipId]);
 
-  // Keyboard shortcuts (Unchanged)
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.code === "Space" && e.target.tagName !== "INPUT") {
@@ -390,75 +490,41 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [currentTime, totalDuration, selectedClipId, clips]);
 
-  // Audio track playback (Unchanged)
+  // Enhanced audio synchronization with the new AudioSyncManager
   useEffect(() => {
-    const audioClips = clips.filter((c) => c.type === "audio");
-    const activeAudioClips = audioClips.filter(
-      (c) => currentTime >= c.startTime && currentTime < c.endTime
+    const activeAudioClips = audioSyncManager.current.getActiveAudioClips(
+      clipsRef.current,
+      currentTime
     );
-    const activeAudioIds = new Set(activeAudioClips.map((c) => c.id));
-    const allClipIds = new Set(clips.map((c) => c.id));
+    const activeClipIds = new Set(activeAudioClips.map(c => c.id));
 
-    const audioElements = audioElementsRef.current;
+    // Clean up removed clips
+    audioSyncManager.current.cleanupClips(activeClipIds);
 
-    // 1. Pause/Remove old/inactive clips
-    Object.keys(audioElements).forEach((clipId) => {
-      const audio = audioElements[clipId];
-      if (!allClipIds.has(clipId)) {
-        // Clip was deleted
-        audio.pause();
-        audio.src = "";
-        delete audioElements[clipId];
-      } else if (!activeAudioIds.has(clipId)) {
-        // Clip is inactive, pause it
-        if (!audio.paused) {
-          audio.pause();
-        }
-      }
+    // Sync each active audio clip
+    activeAudioClips.forEach(clip => {
+      audioSyncManager.current.createAudioElement(clip.id, clip.url);
+      audioSyncManager.current.syncAudio(
+        clip.id,
+        currentTime,
+        isPlaying,
+        clip.startTime,
+        clip.trimStart
+      );
     });
 
-    // 2. Play/Seek active clips
-    activeAudioClips.forEach((clip) => {
-      let audio = audioElements[clip.id];
-
-      if (!audio) {
-        audio = new Audio(clip.url);
-        audio.preload = "auto";
-        audioElements[clip.id] = audio;
-      }
-
-      const relativeTime = currentTime - clip.startTime + clip.trimStart;
-
-      // Sync time if needed
-      if (Math.abs(audio.currentTime - relativeTime) > 0.2) {
-        if (audio.readyState >= 1) {
-          const seekTime = Math.min(relativeTime, audio.duration - 0.1);
-          audio.currentTime = Math.max(0, seekTime);
-        } else {
-          audio.onloadedmetadata = () => {
-            const seekTime = Math.min(relativeTime, audio.duration - 0.1);
-            audio.currentTime = Math.max(0, seekTime);
-          };
-        }
-      }
-
-      // Handle play/pause
-      if (isPlaying && audio.paused) {
-        audio.play().catch((e) => console.warn("Audio play failed", e));
-      } else if (!isPlaying && !audio.paused) {
-        audio.pause();
-      }
-    });
-
-    // Cleanup on component unmount
+    // Cleanup function
     return () => {
-      Object.values(audioElementsRef.current).forEach((audio) => {
-        audio.pause();
-        audio.src = "";
-      });
-      audioElementsRef.current = {};
+      // Cleanup is handled by AudioSyncManager
     };
   }, [clips, currentTime, isPlaying]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      audioSyncManager.current.stopAll();
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">
