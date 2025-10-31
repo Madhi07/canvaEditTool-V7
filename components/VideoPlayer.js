@@ -26,6 +26,8 @@ export default function VideoPlayer({
   const onClipEndRef = useRef(onClipEnd);
   const currentClipRef = useRef(currentClip);
   const lastSrcRef = useRef(null);
+  const imageTimeoutRef = useRef(null);
+  const imageIntervalRef = useRef(null);
 
   // Update refs when props change
   useEffect(() => {
@@ -35,7 +37,7 @@ export default function VideoPlayer({
   useEffect(() => {
     onClipEndRef.current = onClipEnd;
   }, [onClipEnd]);
-  
+
   useEffect(() => {
     currentClipRef.current = currentClip;
   }, [currentClip]);
@@ -80,96 +82,145 @@ export default function VideoPlayer({
     // Ensure audio context is properly initialized
     player.on("play", () => {
       // Resume audio context if suspended (required by some browsers)
-      if (audioContext && audioContext.state === 'suspended') {
-        audioContext.resume().catch(err => {
+      if (audioContext && audioContext.state === "suspended") {
+        audioContext.resume().catch((err) => {
           console.warn("Failed to resume audio context:", err);
         });
       }
     });
-
   }, [audioContext]);
 
-  // Load / play clip safely with improved audio handling
+  // EFFECT 1: Load new clip OR Seek when timeline position changes
+  // EFFECT 1: Load new clip OR Seek when timeline position changes
   useEffect(() => {
     const player = playerRef.current;
     if (!player || !currentClip || !isPlayerReady) return;
 
-    console.log("Switching clip:", currentClip.url, "isPlaying:", isPlaying, "relativeTime:", currentClip.relativeTime);
+    // 🖼️ Handle image clips (simulate playback without seeking or re-triggering)
+    if (currentClip.type === "image") {
+      // Pause any video playback
+      if (!player.paused()) player.pause();
 
+      // Clear existing timers before starting new
+      clearTimeout(imageTimeoutRef.current);
+      clearInterval(imageIntervalRef.current);
+
+      const visibleDuration =
+        currentClip.duration -
+        (currentClip.trimStart || 0) -
+        (currentClip.trimEnd || 0);
+
+      // ⛔ Prevent re-starting when parent re-renders same image
+      if (playerRef.current.clipId === currentClip.id) return;
+      playerRef.current.clipId = currentClip.id;
+
+      if (isPlaying) {
+        let elapsed = 0;
+        const startTime = Date.now();
+
+        imageIntervalRef.current = setInterval(() => {
+          const newElapsed = (Date.now() - startTime) / 1000;
+          elapsed = Math.min(newElapsed, visibleDuration);
+          setLocalTime(elapsed);
+          onTimeUpdateRef.current?.(elapsed, currentClip.id);
+
+          if (elapsed >= visibleDuration) {
+            clearInterval(imageIntervalRef.current);
+            onClipEndRef.current?.(currentClip.id);
+          }
+        }, 50);
+
+        // Backup timeout to ensure clip ends
+        imageTimeoutRef.current = setTimeout(() => {
+          onClipEndRef.current?.(currentClip.id);
+        }, visibleDuration * 1000);
+      }
+
+      return () => {
+        clearTimeout(imageTimeoutRef.current);
+        clearInterval(imageIntervalRef.current);
+      };
+    }
+
+    // 🎥 Handle video clips normally
     const currentSrc = player.currentSrc();
-
-    // Reload only if URL changed or clip ID changes
-    const needsReload = !currentSrc || 
-                       currentSrc !== currentClip.url || 
-                       playerRef.current.clipId !== currentClip.id;
+    const needsReload =
+      !currentSrc ||
+      currentSrc !== currentClip.url ||
+      playerRef.current.clipId !== currentClip.id;
 
     if (needsReload) {
       player.pause();
       playerRef.current.clipId = currentClip.id;
 
-      player.src({ src: currentClip.url, type: "video/mp4" });
+      player.src({
+        src: currentClip.url,
+        type: currentClip.mimeType || "video/mp4",
+      });
 
       player.one("canplay", () => {
         const seekTime = Math.max(0, currentClip.relativeTime || 0);
         player.currentTime(seekTime);
-        
-        // Set audio properties
-        player.muted(false); // Keep unmuted for consistent audio handling
+
+        player.muted(false);
         player.volume(1.0);
 
         if (isPlaying) {
-          // Ensure we don't have multiple play promises
           const playPromise = player.play();
           if (playPromise !== undefined) {
             playPromise.catch((err) => {
               console.warn("Autoplay blocked:", err);
-              // Try again after user interaction
-              if (err.name === "NotAllowedError") {
-                player.one("useractive", () => {
-                  player.play().catch(e => console.warn("Manual play failed:", e));
-                });
-              }
             });
           }
         }
       });
-
-      player.one("loadeddata", () => {
-        console.log("Video data loaded:", currentClip.url);
-      });
-
-    } else {
-      // Same clip — seek if needed
+    } else if (!isPlaying) {
       const currentPlayerTime = player.currentTime();
       const targetTime = Math.max(0, currentClip.relativeTime || 0);
-
       if (Math.abs(currentPlayerTime - targetTime) > 0.1) {
         player.currentTime(targetTime);
-      }
-
-      // Handle play/pause
-      if (isPlaying) {
-        if (player.paused()) {
-          const playPromise = player.play();
-          if (playPromise !== undefined) {
-            playPromise.catch((err) => {
-              console.warn("Play blocked:", err);
-            });
-          }
-        }
-      } else {
-        if (!player.paused()) {
-          player.pause();
-        }
       }
     }
   }, [
     currentClip?.url,
     currentClip?.relativeTime,
     currentClip?.id,
-    currentClip?.hasAudio,
+    currentClip?.mimeType,
+    isPlayerReady,
+    isPlaying,
+  ]);
+
+  // EFFECT 2: Handle Play/Pause state changes
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !isPlayerReady || !currentClip) return; // Need currentClip to be ready
+
+    // Don't do anything if the source isn't loaded yet
+    if (!player.currentSrc() || playerRef.current.clipId !== currentClip.id)
+      return;
+
+    if (isPlaying) {
+      if (player.paused()) {
+        const playPromise = player.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            console.warn("Play blocked:", err);
+            // If blocked, sync state back to paused
+            if (err.name === "NotAllowedError") {
+              onPlayPause(); // Tell parent we couldn't play
+            }
+          });
+        }
+      }
+    } else {
+      if (!player.paused()) {
+        player.pause();
+      }
+    }
+  }, [
     isPlaying,
     isPlayerReady,
+    currentClip?.id, // Re-evaluate when clip changes
   ]);
 
   // Manual play toggle
@@ -195,6 +246,17 @@ export default function VideoPlayer({
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      clearTimeout(imageTimeoutRef.current);
+      clearInterval(imageIntervalRef.current);
+      if (playerRef.current) {
+        playerRef.current.dispose();
+        playerRef.current = null;
+      }
+    };
+  }, []);
+
   return (
     <div className="flex flex-col items-center w-full justify-center bg-white rounded-lg p-4 h-[60vh]">
       {/* Video Display */}
@@ -206,12 +268,26 @@ export default function VideoPlayer({
             transformOrigin: "center",
           }}
         >
+          {/* 🧱 Always keep video element mounted for video.js stability */}
           <video
             ref={videoRef}
             className="video-js vjs-default-skin w-full h-full object-contain absolute inset-0"
             playsInline
             preload="auto"
           />
+
+          {/* 🖼️ Show image overlay if current clip is an image */}
+          {currentClip?.type === "image" && (
+            <img
+              src={currentClip.url}
+              alt={currentClip.fileName || "image"}
+              className="absolute inset-0 w-full h-full object-contain z-10 transition-opacity duration-500"
+              style={{
+                opacity: isPlaying ? 1 : 0.8,
+                backgroundColor: "black",
+              }}
+            />
+          )}
         </div>
       </div>
 

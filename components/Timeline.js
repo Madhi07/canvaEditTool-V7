@@ -25,7 +25,12 @@ export default function Timeline({
   const [dragType, setDragType] = useState(null);
   const [dragClipId, setDragClipId] = useState(null);
   const [dragStartX, setDragStartX] = useState(0);
-  const [dragStartValue, setDragStartValue] = useState(0);
+  const [dragPreviewX, setDragPreviewX] = useState(0);
+  const [hoverInsertTime, setHoverInsertTime] = useState(null);
+
+  // FIX: Use an object to store the clip's state when the drag starts
+  const [dragStartSnapshot, setDragStartSnapshot] = useState(null);
+
   const [zoomLevel, setZoomLevel] = useState(1);
 
   // Constants based on zoom
@@ -34,6 +39,7 @@ export default function Timeline({
   const timelineWidth = maxDuration * pixelsPerSecond;
   const videoClipHeight = 80;
   const audioClipHeight = 50;
+
   // Handle click to seek
   const handleTimelineClick = (e) => {
     if (!timelineRef.current || isDragging) return;
@@ -50,95 +56,140 @@ export default function Timeline({
     setDragType(type);
     setDragClipId(clip.id);
     setDragStartX(e.clientX);
-    
 
-    if (type === "move") {
-      setDragStartValue(clip.startTime);
-    } else if (type === "trim-left") {
-      setDragStartValue(clip.trimStart);
-    } else if (type === "trim-right") {
-      setDragStartValue(clip.trimEnd);
-    }
+    // FIX: Store a snapshot of the clip's state at the *start* of the drag
+    setDragStartSnapshot({
+      startTime: clip.startTime,
+      endTime: clip.endTime,
+      trimStart: clip.trimStart,
+      trimEnd: clip.trimEnd,
+    });
 
     onClipSelect(clip); // Select the clip when dragging starts
   };
 
-  // Global drag listeners
+  // ✅ Global drag listeners wrapped in useEffect
   useEffect(() => {
     const handleMouseMove = (e) => {
-      if (!isDragging || !dragClipId || !dragType) return;
+      if (!isDragging || !dragClipId || !dragType || !dragStartSnapshot) return;
 
       const deltaX = e.clientX - dragStartX;
       const deltaTime = deltaX / pixelsPerSecond;
       const clip = clips.find((c) => c.id === dragClipId);
       if (!clip) return;
 
-      if (dragType === "move") {
-        let newStartTime = Math.max(0, dragStartValue + deltaTime);
-        const clipDuration = clip.endTime - clip.startTime;
+      const {
+        startTime: startSnapshotTime,
+        endTime: endSnapshotTime,
+        trimStart: trimStartSnapshot,
+        trimEnd: trimEndSnapshot,
+      } = dragStartSnapshot;
 
-        // Update clip with new start/end times
+      // ✨ update preview X position for ghost clip
+      setDragPreviewX(e.clientX);
+
+      if (dragType === "move") {
+        let newStartTime = Math.max(0, startSnapshotTime + deltaTime);
+        const clipDuration = endSnapshotTime - startSnapshotTime;
+
+        // Update clip position live
         onClipUpdate(clip.id, {
           startTime: newStartTime,
           endTime: newStartTime + clipDuration,
         });
 
-        // Seek the playhead to the new start time to follow the clip
+        // ✨ compute nearest drop indicator
+        const sorted = [...clips]
+          .filter((c) => c.id !== dragClipId)
+          .sort((a, b) => a.startTime - b.startTime);
+
+        let nearestEdge = 0;
+        let minDist = Infinity;
+
+        sorted.forEach((c) => {
+          const leftEdge = c.startTime;
+          const rightEdge = c.endTime;
+          const distLeft = Math.abs(newStartTime - leftEdge);
+          const distRight = Math.abs(newStartTime - rightEdge);
+          if (distLeft < minDist) {
+            minDist = distLeft;
+            nearestEdge = leftEdge;
+          }
+          if (distRight < minDist) {
+            minDist = distRight;
+            nearestEdge = rightEdge;
+          }
+        });
+
+        // Update indicator time
+        setHoverInsertTime(nearestEdge);
+
         onSeek(newStartTime + MIN_CLIP_DURATION);
       } else if (dragType === "trim-left") {
-        let newTrimStart = dragStartValue + deltaTime;
-
-        // Clamp to 0 and ensure min duration
+        let newTrimStart = trimStartSnapshot + deltaTime;
         newTrimStart = Math.max(0, newTrimStart);
         newTrimStart = Math.min(
           newTrimStart,
-          clip.duration - clip.trimEnd - MIN_CLIP_DURATION
+          clip.duration - trimEndSnapshot - MIN_CLIP_DURATION
         );
 
-        // Adjust clip start time based on trim (ripple edit)
-        const trimChange = newTrimStart - clip.trimStart;
-        const newStartTime = clip.startTime + trimChange;
+        const trimChange = newTrimStart - trimStartSnapshot;
+        const newStartTime = startSnapshotTime + trimChange;
+        const newTimelineDuration =
+          clip.duration - newTrimStart - trimEndSnapshot;
+        const newEndTime = newStartTime + newTimelineDuration;
 
         onClipUpdate(clip.id, {
           trimStart: newTrimStart,
           startTime: newStartTime,
-        });
-
-        // Seek the playhead to the new start time to reflect the trim
-        onSeek(newStartTime);
-      } else if (dragType === "trim-right") {
-        let newTrimEnd = dragStartValue - deltaTime;
-
-        // Clamp to 0 and ensure min duration
-        newTrimEnd = Math.max(0, newTrimEnd);
-        newTrimEnd = Math.min(
-          newTrimEnd,
-          clip.duration - clip.trimStart - MIN_CLIP_DURATION
-        );
-
-        // Adjust clip end time based on trim
-        const newDuration = clip.duration - clip.trimStart - newTrimEnd;
-        const newEndTime = clip.startTime + newDuration;
-
-        onClipUpdate(clip.id, {
-          trimEnd: newTrimEnd,
           endTime: newEndTime,
         });
+
+        onSeek(newStartTime);
+      } else if (dragType === "trim-right") {
+        let newEndTime = endSnapshotTime + deltaTime;
+
+        // 🧩 Allow extending image duration beyond original
+        if (clip.type === "image") {
+          const newDuration = Math.max(
+            MIN_CLIP_DURATION,
+            newEndTime - startSnapshotTime
+          );
+          onClipUpdate(clip.id, {
+            duration: newDuration,
+            endTime: newEndTime,
+          });
+        } else {
+          // keep video trim logic as-is
+          let newTrimEnd = trimEndSnapshot - deltaTime;
+          newTrimEnd = Math.max(0, newTrimEnd);
+          newTrimEnd = Math.min(
+            newTrimEnd,
+            clip.duration - trimStartSnapshot - MIN_CLIP_DURATION
+          );
+
+          const newTimelineDuration =
+            clip.duration - trimStartSnapshot - newTrimEnd;
+          onClipUpdate(clip.id, {
+            trimEnd: newTrimEnd,
+            endTime: startSnapshotTime + newTimelineDuration,
+          });
+        }
       }
     };
 
     const handleMouseUp = () => {
       if (isDragging && dragClipId && dragType === "move") {
         const clip = clips.find((c) => c.id === dragClipId);
-        if (clip) {
-          // ✅ Call handleDragEnd when clip is released
-          handleDragEnd(clip.id, clip.startTime);
-        }
+        if (clip) handleDragEnd(clip.id, clip.startTime);
       }
 
       setIsDragging(false);
       setDragType(null);
       setDragClipId(null);
+      setDragStartSnapshot(null);
+      setDragPreviewX(null); // ✅ clear ghost
+      setHoverInsertTime(null); // ✅ clear blue line
     };
 
     if (isDragging) {
@@ -155,7 +206,7 @@ export default function Timeline({
     dragClipId,
     dragStartX,
     dragType,
-    dragStartValue,
+    dragStartSnapshot,
     pixelsPerSecond,
     clips,
     onClipUpdate,
@@ -177,13 +228,23 @@ export default function Timeline({
 
   // Sync scrolling - only timeline scrolls, time markers follow
   useEffect(() => {
-    const timelineContainer = timelineRef.current.parentElement; // Timeline is wrapped by an overflow div
+    // Ensure parentElement exists before adding listener
+    if (
+      !timelineRef.current ||
+      !timelineRef.current.parentElement ||
+      !timeMarkersRef.current ||
+      !timeMarkersRef.current.parentElement
+    ) {
+      return;
+    }
+
+    const timelineContainer = timelineRef.current.parentElement;
     const timeMarkersContainer = timeMarkersRef.current.parentElement;
 
-    if (!timelineContainer || !timeMarkersContainer) return;
-
     const handleTimelineScroll = () => {
-      timeMarkersContainer.scrollLeft = timelineContainer.scrollLeft;
+      if (timeMarkersContainer) {
+        timeMarkersContainer.scrollLeft = timelineContainer.scrollLeft;
+      }
     };
 
     timelineContainer.addEventListener("scroll", handleTimelineScroll);
@@ -191,12 +252,22 @@ export default function Timeline({
     return () => {
       timelineContainer.removeEventListener("scroll", handleTimelineScroll);
     };
-  }, []);
+  }, []); // Re-run if refs change (though they shouldn't)
 
   const handleDragEnd = (clipId, newStartTime) => {
+    const clip = clips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    // Calculate duration from its properties, not from subtraction
+    const clipTimelineDuration = clip.duration - clip.trimStart - clip.trimEnd;
+
     const updated = clips.map((c) =>
       c.id === clipId
-        ? { ...c, startTime: newStartTime, endTime: newStartTime + c.duration }
+        ? {
+            ...c,
+            startTime: newStartTime,
+            endTime: newStartTime + clipTimelineDuration,
+          }
         : c
     );
 
@@ -210,7 +281,6 @@ export default function Timeline({
       return layer ? { ...c, track: layer.track } : c;
     });
 
-    // ✅ Notify parent (index.js)
     if (onAutoLayerFix) onAutoLayerFix(merged);
   };
 
@@ -241,6 +311,7 @@ export default function Timeline({
       layer.map((clip) => ({ ...clip, track: i }))
     );
   }
+
 
   // Enhanced time markers
   const generateTimeMarkers = () => {
@@ -285,7 +356,7 @@ export default function Timeline({
 
   return (
     <div className="bg-white">
-      {/* Zoom Controls (From your previous code) */}
+      {/* Zoom Controls */}
       <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-gray-700">Timeline</span>
@@ -340,7 +411,7 @@ export default function Timeline({
       </div>
 
       {/* Time markers header - no scrollbar */}
-      <div className="relative overflow-hidden bg-white px-4">
+      <div className="relative overflow-hidden bg-white px-4 border-b border-gray-200">
         <div
           ref={timeMarkersRef}
           className="relative h-10"
@@ -352,7 +423,7 @@ export default function Timeline({
 
       {/* Main timeline with single scrollbar */}
       <div
-        className="relative overflow-x-auto timeline-container cursor-pointer bg-gray-50 border-t border-gray-200"
+        className="relative overflow-x-auto timeline-container cursor-pointer bg-gray-50"
         style={{ minHeight: "220px" }}
       >
         <div
@@ -361,7 +432,7 @@ export default function Timeline({
           style={{ width: `${timelineWidth}px`, minHeight: "160px" }}
           onClick={handleTimelineClick}
         >
-          {/* Playhead (Clean style) */}
+          {/* Playhead */}
           <motion.div
             className="absolute top-0 w-[3px] bg-red-500 bottom-0 z-30 pointer-events-none flex justify-center"
             animate={{ left: currentTime * pixelsPerSecond }}
@@ -372,10 +443,7 @@ export default function Timeline({
               mass: 0.3,
             }}
           >
-            {/* Playhead top indicator */}
             <div className="absolute -top-0.5 -left-[4px] w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-red-500"></div>
-
-            {/* Center circle */}
             <div className="absolute top-1/2 -left-[4px] w-[11px] h-[11px] bg-red-500 rounded-full border-2 border-white transform -translate-y-1/2"></div>
           </motion.div>
 
@@ -393,7 +461,6 @@ export default function Timeline({
             className="absolute inset-x-0 border-b border-gray-300/50"
             style={{
               top: `${videoClipHeight + 50}px`,
-
               height: `${audioClipHeight + 10}px`,
             }}
           >
@@ -402,18 +469,54 @@ export default function Timeline({
             </span>
           </div>
 
+          {/* 🟢 PUT THESE TWO NEW ELEMENTS RIGHT HERE */}
+          {isDragging && dragType === "move" && dragClipId && (
+            <motion.div
+              className="absolute z-40 pointer-events-none rounded-lg overflow-hidden shadow-lg opacity-70 border border-blue-400"
+              style={{
+                top: "20px",
+                left: `${dragPreviewX - 80}px`, // centers under cursor
+                width: "160px",
+                height: "60px",
+                background: "#3b82f6",
+                scale: 1.05,
+              }}
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 0.8, scale: 1.05 }}
+              transition={{ type: "spring", stiffness: 120, damping: 10 }}
+            >
+              <div className="flex items-center justify-center h-full text-white text-sm font-medium">
+                Moving...
+              </div>
+            </motion.div>
+          )}
+
+          {/* 🧭 Drop indicator line */}
+          {hoverInsertTime !== null && (
+            <motion.div
+              className="absolute top-0 bottom-0 w-[3px] bg-blue-500 z-30 rounded-full"
+              animate={{ left: hoverInsertTime * pixelsPerSecond }}
+              transition={{ type: "spring", stiffness: 300, damping: 25 }}
+            />
+          )}
+
           {/* Clips */}
-
           {clips.map((clip) => {
-            const clipDuration = clip.endTime - clip.startTime;
+            // FIX: Calculate timeline duration from trim values
+            const clipTimelineDuration =
+              clip.duration - clip.trimStart - clip.trimEnd;
 
-            const clipWidth = clipDuration * pixelsPerSecond;
+            // Ensure duration is not negative
+            if (clipTimelineDuration < MIN_CLIP_DURATION) {
+              // This shouldn't happen with the new logic, but as a safeguard:
+              console.warn("Clip duration is too small:", clip.id);
+              // You could choose to not render it, or render a minimal clip
+            }
 
+            const clipWidth = clipTimelineDuration * pixelsPerSecond;
             const clipHeight =
               clip.type === "audio" ? audioClipHeight : videoClipHeight;
-
             const clipLeft = clip.startTime * pixelsPerSecond;
-
             const isSelected = clip.id === selectedClipId;
 
             let trackPosition =
@@ -445,9 +548,7 @@ export default function Timeline({
                   top: `${trackPosition}px`,
                 }}
                 onMouseDown={(e) => handleClipMouseDown(e, clip, "move")}
-                // ✅ Add this new event handler:
                 onContextMenu={(e) => {
-                  // Right-click to split
                   if (clip.type === "audio") {
                     e.preventDefault();
                     const rect = e.currentTarget.getBoundingClientRect();
@@ -460,10 +561,7 @@ export default function Timeline({
                   }
                 }}
               >
-                {/* ✅ FIX: Conditional rendering of visual content
-                  We only render thumbnails/placeholders for non-audio clips.
-                  Audio clips get a clear background for the waveform.
-                */}
+                {/* Visual content */}
                 {clip.type === "video" || clip.type === "image" ? (
                   clip.thumbnail ? (
                     <img
@@ -477,30 +575,29 @@ export default function Timeline({
                     </div>
                   )
                 ) : (
-                  // Simple background layer for audio clips to see the waveform over it
                   <div className="w-full h-full bg-blue-400/80 absolute inset-0 rounded-xl"></div>
                 )}
 
-                {/* ✅ Waveform Renderer for Audio Clips (Placed on top of the background) */}
+                {/* Waveform Renderer for Audio Clips */}
                 {clip.type === "audio" && (
-                  // The wrapper div is still needed for positioning over the green background
                   <div className="absolute inset-0 z-10 flex items-center justify-center p-2">
                     <AudioClipWaveform
-                      // Required Props for the new component
-                      audioUrl={clip.url} // Assuming the clip object stores the file URL
-                      duration={clip.duration} // Total original duration of the media file
-                      width={clipWidth} // Pass the dynamically calculated width
-                      height={clipHeight - 10} // Use the fixed track height (e.g., 90)
-                      progress={(currentTime - clip.startTime) / clipDuration} // Calculate playback progress (0 to 1)
+                      audioUrl={clip.url}
+                      duration={clip.duration}
+                      width={clipWidth}
+                      height={clipHeight - 10}
+                      progress={
+                        (currentTime - clip.startTime) / clipTimelineDuration
+                      }
                       isSelected={isSelected}
-                      color="#FFFFFF" // White waves to contrast with the green clip background
+                      color="#FFFFFF"
                     />
                   </div>
                 )}
 
                 {/* Duration label */}
                 <div className="absolute bottom-1 left-2 bg-black/80 text-white text-[11px] px-2 py-1 rounded-md font-semibold z-30">
-                  {clipDuration.toFixed(1)}s
+                  {clipTimelineDuration.toFixed(1)}s
                 </div>
 
                 {/* Clip Name */}
@@ -508,7 +605,7 @@ export default function Timeline({
                   {clip.fileName.substring(0, 15)}
                 </div>
 
-                {/* Trim Handles (Clean style) */}
+                {/* Trim Handles */}
                 {isSelected && (
                   <>
                     {/* Left Trim Handle */}

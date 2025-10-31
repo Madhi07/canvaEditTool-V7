@@ -27,7 +27,7 @@ class AudioSyncManager {
     audio.preload = "auto";
     audio.crossOrigin = "anonymous";
     audio.src = url;
-    
+
     // Store metadata
     const elementData = {
       audio,
@@ -35,7 +35,7 @@ class AudioSyncManager {
       url,
       isActive: false,
       lastSyncTime: 0,
-      syncOffset: 0
+      syncOffset: 0,
     };
 
     this.audioElements.set(clipId, elementData);
@@ -48,8 +48,13 @@ class AudioSyncManager {
     if (!elementData) return;
 
     const { audio } = elementData;
-    const relativeTime = Math.max(0, timelineTime - clipStartTime + clipTrimStart);
-    const isActive = timelineTime >= clipStartTime && timelineTime < (clipStartTime + audio.duration);
+    const relativeTime = Math.max(
+      0,
+      timelineTime - clipStartTime + clipTrimStart
+    );
+    const isActive =
+      timelineTime >= clipStartTime &&
+      timelineTime < clipStartTime + audio.duration;
 
     elementData.isActive = isActive;
 
@@ -61,7 +66,10 @@ class AudioSyncManager {
 
       // Sync if significantly out of sync
       if (timeDiff > this.syncTolerance) {
-        audio.currentTime = Math.max(0, Math.min(desiredTime, audio.duration - 0.1));
+        audio.currentTime = Math.max(
+          0,
+          Math.min(desiredTime, audio.duration - 0.1)
+        );
         elementData.lastSyncTime = timelineTime;
       }
 
@@ -95,15 +103,16 @@ class AudioSyncManager {
   // Get all active audio clips at current time
   getActiveAudioClips(clips, timelineTime) {
     return clips.filter(
-      clip => clip.type === "audio" && 
-      timelineTime >= clip.startTime && 
-      timelineTime < clip.endTime
+      (clip) =>
+        clip.type === "audio" &&
+        timelineTime >= clip.startTime &&
+        timelineTime < clip.endTime
     );
   }
 
   // Stop all audio
   stopAll() {
-    this.audioElements.forEach(elementData => {
+    this.audioElements.forEach((elementData) => {
       if (!elementData.audio.paused) {
         elementData.audio.pause();
       }
@@ -206,31 +215,39 @@ export default function Home() {
   }, [clips]);
 
   // Enhanced clip end handler with better sync
-  const handleClipEnd = useCallback((endedClipId) => {
-    const visualClips = clipsRef.current
-      .filter((c) => c.type === "video" || c.type === "image")
-      .sort((a, b) => a.startTime - b.startTime);
+  // Enhanced clip end handler with image continuation fix
+  const handleClipEnd = useCallback(
+    (endedClipId) => {
+      const visualClips = clipsRef.current
+        .filter((c) => c.type === "video" || c.type === "image")
+        .sort((a, b) => a.startTime - b.startTime);
 
-    const currentVisualIndex = visualClips.findIndex(
-      (c) => c.id === endedClipId
-    );
+      const currentVisualIndex = visualClips.findIndex(
+        (c) => c.id === endedClipId
+      );
 
-    if (
-      currentVisualIndex !== -1 &&
-      currentVisualIndex < visualClips.length - 1
-    ) {
-      const nextClip = visualClips[currentVisualIndex + 1];
+      if (
+        currentVisualIndex !== -1 &&
+        currentVisualIndex < visualClips.length - 1
+      ) {
+        const nextClip = visualClips[currentVisualIndex + 1];
 
-      // Switch to the next visual clip
-      setSelectedClipId(nextClip.id);
-      setCurrentTime(nextClip.startTime);
-      setIsPlaying(true);
-    } else {
-      // No more visual clips — stop playback
-      setIsPlaying(false);
-      audioSyncManager.current.stopAll();
-    }
-  }, []);
+        // Move to the next clip instantly
+        setSelectedClipId(nextClip.id);
+        setCurrentTime(nextClip.startTime);
+
+        // ✅ Continue playback automatically if user was playing
+        if (isPlaying) {
+          setTimeout(() => setIsPlaying(true), 50);
+        }
+      } else {
+        // End of timeline
+        setIsPlaying(false);
+        audioSyncManager.current.stopAll();
+      }
+    },
+    [isPlaying]
+  );
 
   // Enhanced media upload handler
   const handleMediaUpload = async (file, type) => {
@@ -238,7 +255,7 @@ export default function Home() {
 
     const getDuration = () =>
       new Promise((resolve) => {
-        if (type === "image") return resolve(5);
+        if (type === "image") return resolve(3);
         const media =
           type === "video"
             ? document.createElement("video")
@@ -321,26 +338,42 @@ export default function Home() {
       if (index === -1) return updated;
 
       const clip = updated[index];
-      if (splitTime <= clip.startTime || splitTime >= clip.endTime)
+
+      // Prevent invalid splits near the clip edges
+      if (
+        splitTime <= clip.startTime + 0.05 ||
+        splitTime >= clip.endTime - 0.05
+      )
         return updated;
 
+      // 1️⃣ Find where we’re splitting inside the *original file*
+      const totalVisibleDuration =
+        clip.duration - clip.trimStart - clip.trimEnd;
+      const splitOffset = splitTime - clip.startTime; // seconds from clip start
+      const splitRelative = clip.trimStart + splitOffset; // position in the file
+
+      // 2️⃣ Create the first clip (start → split)
       const firstPart = {
         ...clip,
         id: `${clip.id}-part1-${Date.now()}`,
         endTime: splitTime,
-        duration: splitTime - clip.startTime,
-        trimEnd: clip.trimStart + (splitTime - clip.startTime),
+        // keep same full file duration
+        trimStart: clip.trimStart,
+        trimEnd: clip.duration - splitRelative, // amount remaining after split
       };
 
+      // 3️⃣ Create the second clip (split → end)
       const secondPart = {
         ...clip,
         id: `${clip.id}-part2-${Date.now()}`,
         startTime: splitTime,
-        duration: clip.endTime - splitTime,
-        trimStart: clip.trimStart + (splitTime - clip.startTime),
+        trimStart: splitRelative,
+        trimEnd: clip.trimEnd,
       };
 
+      // 4️⃣ Replace the original with the two parts
       updated.splice(index, 1, firstPart, secondPart);
+
       return updated;
     });
   };
@@ -381,10 +414,23 @@ export default function Home() {
   };
 
   // Timeline & Player handlers
-  const handleClipUpdate = (clipId, updates) =>
-    setClips((prev) =>
-      prev.map((c) => (c.id === clipId ? { ...c, ...updates } : c))
-    );
+  const handleClipUpdate = (clipId, updates) => {
+    setClips((prev) => {
+      const updated = prev.map((c) =>
+        c.id === clipId ? { ...c, ...updates } : c
+      );
+
+      if (
+        updates.trimStart !== undefined ||
+        updates.trimEnd !== undefined ||
+        updates.startTime !== undefined // added for moving
+      ) {
+        return autoReflowClips(updated);
+      }
+
+      return updated;
+    });
+  };
 
   const handleClipSelect = (clip) => {
     setSelectedClipId(clip.id);
@@ -496,13 +542,13 @@ export default function Home() {
       clipsRef.current,
       currentTime
     );
-    const activeClipIds = new Set(activeAudioClips.map(c => c.id));
+    const activeClipIds = new Set(activeAudioClips.map((c) => c.id));
 
     // Clean up removed clips
     audioSyncManager.current.cleanupClips(activeClipIds);
 
     // Sync each active audio clip
-    activeAudioClips.forEach(clip => {
+    activeAudioClips.forEach((clip) => {
       audioSyncManager.current.createAudioElement(clip.id, clip.url);
       audioSyncManager.current.syncAudio(
         clip.id,
@@ -525,6 +571,65 @@ export default function Home() {
       audioSyncManager.current.stopAll();
     };
   }, []);
+
+  // Automatically arrange clips sequentially (no gaps or overlaps)
+  const autoReflowClips = (inputClips) => {
+    const sorted = [...inputClips]
+      .filter((c) => c.type === "video" || c.type === "image")
+      .sort((a, b) => a.startTime - b.startTime);
+
+    let currentTime = 0;
+    const adjusted = sorted.map((clip) => {
+      const newStart = currentTime;
+      const clipLength = clip.duration - clip.trimStart - clip.trimEnd;
+      const newEnd = newStart + clipLength;
+      currentTime = newEnd;
+
+      return {
+        ...clip,
+        startTime: newStart,
+        endTime: newEnd,
+      };
+    });
+
+    // Keep audio and other clips untouched
+    const nonVisuals = inputClips.filter(
+      (c) => c.type !== "video" && c.type !== "image"
+    );
+
+    return [...adjusted, ...nonVisuals];
+  };
+
+  // 🖼️ Handle image clip playback progression manually
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const activeClip = clips.find(
+      (clip) => currentTime >= clip.startTime && currentTime < clip.endTime
+    );
+    if (!activeClip || activeClip.type !== "image") return;
+
+    // Smooth time progression for image clips
+    const interval = setInterval(() => {
+      setCurrentTime((prev) => {
+        const next = prev + 0.05; // roughly 20 FPS (0.05s steps)
+        if (next >= activeClip.endTime) {
+          clearInterval(interval);
+
+          // Move to the next clip
+          const nextClip = clips.find((c) => c.startTime >= activeClip.endTime);
+          if (nextClip) {
+            setCurrentTime(nextClip.startTime);
+          } else {
+            setIsPlaying(false);
+          }
+        }
+        return next;
+      });
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, currentTime, clips]);
 
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">
