@@ -126,35 +126,93 @@ export default function Timeline({
 
         onSeek(newStartTime + MIN_CLIP_DURATION);
       } else if (dragType === "trim-left") {
-        let newTrimStart = trimStartSnapshot + deltaTime;
-        newTrimStart = Math.max(0, newTrimStart);
-        newTrimStart = Math.min(
-          newTrimStart,
-          clip.duration - trimEndSnapshot - MIN_CLIP_DURATION
-        );
+        if (clip.type === "image") {
+          // 🖼 Extend or shrink the image duration by adjusting startTime
+          let newStart = Math.max(0, startSnapshotTime + deltaTime);
+          const newDuration = Math.max(
+            MIN_CLIP_DURATION,
+            endSnapshotTime - newStart
+          );
 
-        const trimChange = newTrimStart - trimStartSnapshot;
-        const newStartTime = startSnapshotTime + trimChange;
-        const newTimelineDuration =
-          clip.duration - newTrimStart - trimEndSnapshot;
-        const newEndTime = newStartTime + newTimelineDuration;
+          onClipUpdate(clip.id, {
+            startTime: newStart,
+            endTime: endSnapshotTime,
+            duration: newDuration,
+          });
 
-        onClipUpdate(clip.id, {
-          trimStart: newTrimStart,
-          startTime: newStartTime,
-          endTime: newEndTime,
-        });
+          onSeek(newStart);
+        } else {
+          // 🎥 Keep original video trimming logic
+          let newTrimStart = trimStartSnapshot + deltaTime;
+          newTrimStart = Math.max(0, newTrimStart);
+          newTrimStart = Math.min(
+            newTrimStart,
+            clip.duration - trimEndSnapshot - MIN_CLIP_DURATION
+          );
 
-        onSeek(newStartTime);
+          const trimChange = newTrimStart - trimStartSnapshot;
+          const newStartTime = startSnapshotTime + trimChange;
+          const newTimelineDuration =
+            clip.duration - newTrimStart - trimEndSnapshot;
+          const newEndTime = newStartTime + newTimelineDuration;
+
+          onClipUpdate(clip.id, {
+            trimStart: newTrimStart,
+            startTime: newStartTime,
+            endTime: newEndTime,
+          });
+
+          onSeek(newStartTime);
+        }
       } else if (dragType === "trim-right") {
         let newEndTime = endSnapshotTime + deltaTime;
 
         // 🧩 Allow extending image duration beyond original
         if (clip.type === "image") {
-          const newDuration = Math.max(
-            MIN_CLIP_DURATION,
-            newEndTime - startSnapshotTime
+          const nextClip = clips
+            .filter((c) => c.startTime > clip.startTime)
+            .sort((a, b) => a.startTime - b.startTime)[0];
+
+          // Calculate new potential end
+          let newEndTime = endSnapshotTime + deltaTime;
+
+          if (deltaTime > 0) {
+            // ➕ Extending image to the right
+            if (nextClip) {
+              const overlap = newEndTime - nextClip.startTime;
+              if (overlap > 0) {
+                // Push the next clip forward to avoid overlap
+                const pushedStart = nextClip.startTime + overlap;
+                const pushedEnd = nextClip.endTime + overlap;
+                onClipUpdate(nextClip.id, {
+                  startTime: pushedStart,
+                  endTime: pushedEnd,
+                });
+              }
+            }
+          } else if (deltaTime < 0) {
+            // ➖ Shrinking image to the left, pull next clip backward to fill gap
+            if (nextClip) {
+              const shrinkGap = endSnapshotTime - newEndTime;
+              const pulledStart = Math.max(0, nextClip.startTime - shrinkGap);
+              const pulledEnd = Math.max(
+                pulledStart + (nextClip.endTime - nextClip.startTime),
+                0
+              );
+              onClipUpdate(nextClip.id, {
+                startTime: pulledStart,
+                endTime: pulledEnd,
+              });
+            }
+          }
+
+          // Apply to current image
+          newEndTime = Math.max(
+            newEndTime,
+            startSnapshotTime + MIN_CLIP_DURATION
           );
+          const newDuration = newEndTime - startSnapshotTime;
+
           onClipUpdate(clip.id, {
             duration: newDuration,
             endTime: newEndTime,
@@ -311,7 +369,6 @@ export default function Timeline({
       layer.map((clip) => ({ ...clip, track: i }))
     );
   }
-
 
   // Enhanced time markers
   const generateTimeMarkers = () => {
@@ -640,3 +697,4 @@ export default function Timeline({
     </div>
   );
 }
+

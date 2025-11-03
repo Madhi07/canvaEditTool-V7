@@ -7,118 +7,10 @@ import {
   extractThumbnailFromVideo,
   getImageThumbnail,
 } from "../utils/thumbnailExtractor";
+import { useAudioSyncManager } from "../utils/useAudioSyncManager";
 
-// Enhanced audio element management with better sync
-class AudioSyncManager {
-  constructor() {
-    this.audioElements = new Map();
-    this.masterClock = 0;
-    this.isPlaying = false;
-    this.lastUpdateTime = 0;
-    this.syncTolerance = 0.1; // 100ms tolerance
-  }
 
-  createAudioElement(clipId, url) {
-    if (this.audioElements.has(clipId)) {
-      return this.audioElements.get(clipId);
-    }
 
-    const audio = new Audio();
-    audio.preload = "auto";
-    audio.crossOrigin = "anonymous";
-    audio.src = url;
-
-    // Store metadata
-    const elementData = {
-      audio,
-      clipId,
-      url,
-      isActive: false,
-      lastSyncTime: 0,
-      syncOffset: 0,
-    };
-
-    this.audioElements.set(clipId, elementData);
-    return elementData;
-  }
-
-  // Synchronize audio with master timeline
-  syncAudio(clipId, timelineTime, isPlaying, clipStartTime, clipTrimStart) {
-    const elementData = this.audioElements.get(clipId);
-    if (!elementData) return;
-
-    const { audio } = elementData;
-    const relativeTime = Math.max(
-      0,
-      timelineTime - clipStartTime + clipTrimStart
-    );
-    const isActive =
-      timelineTime >= clipStartTime &&
-      timelineTime < clipStartTime + audio.duration;
-
-    elementData.isActive = isActive;
-
-    if (isActive) {
-      // Calculate desired audio position
-      const desiredTime = relativeTime;
-      const currentTime = audio.currentTime;
-      const timeDiff = Math.abs(desiredTime - currentTime);
-
-      // Sync if significantly out of sync
-      if (timeDiff > this.syncTolerance) {
-        audio.currentTime = Math.max(
-          0,
-          Math.min(desiredTime, audio.duration - 0.1)
-        );
-        elementData.lastSyncTime = timelineTime;
-      }
-
-      // Play/pause based on global state
-      if (isPlaying && audio.paused) {
-        audio.play().catch((e) => {
-          console.warn(`Audio play failed for clip ${clipId}:`, e);
-        });
-      } else if (!isPlaying && !audio.paused) {
-        audio.pause();
-      }
-    } else {
-      // Not active, ensure paused
-      if (!audio.paused) {
-        audio.pause();
-      }
-    }
-  }
-
-  // Cleanup removed clips
-  cleanupClips(activeClipIds) {
-    for (const [clipId, elementData] of this.audioElements.entries()) {
-      if (!activeClipIds.has(clipId)) {
-        elementData.audio.pause();
-        elementData.audio.src = "";
-        this.audioElements.delete(clipId);
-      }
-    }
-  }
-
-  // Get all active audio clips at current time
-  getActiveAudioClips(clips, timelineTime) {
-    return clips.filter(
-      (clip) =>
-        clip.type === "audio" &&
-        timelineTime >= clip.startTime &&
-        timelineTime < clip.endTime
-    );
-  }
-
-  // Stop all audio
-  stopAll() {
-    this.audioElements.forEach((elementData) => {
-      if (!elementData.audio.paused) {
-        elementData.audio.pause();
-      }
-    });
-  }
-}
 
 export default function Home() {
   const [clips, setClips] = useState([
@@ -146,7 +38,7 @@ export default function Home() {
   const [videoZoom, setVideoZoom] = useState(1);
 
   const clipsRef = useRef(clips);
-  const audioSyncManager = useRef(new AudioSyncManager());
+  const audioSyncManager = useAudioSyncManager();
 
   useEffect(() => {
     clipsRef.current = clips;
@@ -243,7 +135,7 @@ export default function Home() {
       } else {
         // End of timeline
         setIsPlaying(false);
-        audioSyncManager.current.stopAll();
+        audioSyncManager.stopAll();
       }
     },
     [isPlaying]
@@ -436,13 +328,13 @@ export default function Home() {
     setSelectedClipId(clip.id);
     setCurrentTime(clip.startTime);
     setIsPlaying(false);
-    audioSyncManager.current.stopAll();
+    audioSyncManager.stopAll();
   };
 
   const handleSeek = (time) => {
     setCurrentTime(time);
     setIsPlaying(false);
-    audioSyncManager.current.stopAll();
+    audioSyncManager.stopAll();
   };
 
   const handlePlayPause = () => setIsPlaying((prev) => !prev);
@@ -538,19 +430,19 @@ export default function Home() {
 
   // Enhanced audio synchronization with the new AudioSyncManager
   useEffect(() => {
-    const activeAudioClips = audioSyncManager.current.getActiveAudioClips(
+    const activeAudioClips = audioSyncManager.getActiveAudioClips(
       clipsRef.current,
       currentTime
     );
     const activeClipIds = new Set(activeAudioClips.map((c) => c.id));
 
     // Clean up removed clips
-    audioSyncManager.current.cleanupClips(activeClipIds);
+    audioSyncManager.cleanupClips(activeClipIds);
 
     // Sync each active audio clip
     activeAudioClips.forEach((clip) => {
-      audioSyncManager.current.createAudioElement(clip.id, clip.url);
-      audioSyncManager.current.syncAudio(
+      audioSyncManager.createAudioElement(clip.id, clip.url);
+      audioSyncManager.syncAudio(
         clip.id,
         currentTime,
         isPlaying,
@@ -568,7 +460,7 @@ export default function Home() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      audioSyncManager.current.stopAll();
+      audioSyncManager.stopAll();
     };
   }, []);
 
@@ -600,35 +492,40 @@ export default function Home() {
     return [...adjusted, ...nonVisuals];
   };
 
-  // 🖼️ Handle image clip playback progression manually
+  // 🖼️ Handle image clip playback + seamless transition between video/image/video
   useEffect(() => {
     if (!isPlaying) return;
 
     const activeClip = clips.find(
       (clip) => currentTime >= clip.startTime && currentTime < clip.endTime
     );
-    if (!activeClip || activeClip.type !== "image") return;
+    if (!activeClip) return;
 
-    // Smooth time progression for image clips
-    const interval = setInterval(() => {
-      setCurrentTime((prev) => {
-        const next = prev + 0.05; // roughly 20 FPS (0.05s steps)
-        if (next >= activeClip.endTime) {
-          clearInterval(interval);
+    // Handle image playback manually
+    if (activeClip.type === "image") {
+      const interval = setInterval(() => {
+        setCurrentTime((prev) => {
+          const nextTime = prev + 0.05; // 20 FPS smooth step
+          if (nextTime >= activeClip.endTime) {
+            clearInterval(interval);
 
-          // Move to the next clip
-          const nextClip = clips.find((c) => c.startTime >= activeClip.endTime);
-          if (nextClip) {
-            setCurrentTime(nextClip.startTime);
-          } else {
-            setIsPlaying(false);
+            // Move to next clip if any
+            const nextClip = clips.find(
+              (c) => c.startTime >= activeClip.endTime
+            );
+            if (nextClip) {
+              setCurrentTime(nextClip.startTime);
+              // ✅ Continue playback automatically
+              setTimeout(() => setIsPlaying(true), 50);
+            } else {
+              setIsPlaying(false);
+            }
           }
-        }
-        return next;
-      });
-    }, 50);
-
-    return () => clearInterval(interval);
+          return nextTime;
+        });
+      }, 50);
+      return () => clearInterval(interval);
+    }
   }, [isPlaying, currentTime, clips]);
 
   return (

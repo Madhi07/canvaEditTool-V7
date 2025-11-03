@@ -29,6 +29,9 @@ export default function VideoPlayer({
   const imageTimeoutRef = useRef(null);
   const imageIntervalRef = useRef(null);
 
+  const backgroundAudioRef = useRef(null);
+
+
   // Update refs when props change
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
@@ -91,58 +94,18 @@ export default function VideoPlayer({
   }, [audioContext]);
 
   // EFFECT 1: Load new clip OR Seek when timeline position changes
-  // EFFECT 1: Load new clip OR Seek when timeline position changes
   useEffect(() => {
     const player = playerRef.current;
     if (!player || !currentClip || !isPlayerReady) return;
 
     // 🖼️ Handle image clips (simulate playback without seeking or re-triggering)
     if (currentClip.type === "image") {
-      // Pause any video playback
+      // Just pause the video player — image playback is managed globally
       if (!player.paused()) player.pause();
-
-      // Clear existing timers before starting new
-      clearTimeout(imageTimeoutRef.current);
-      clearInterval(imageIntervalRef.current);
-
-      const visibleDuration =
-        currentClip.duration -
-        (currentClip.trimStart || 0) -
-        (currentClip.trimEnd || 0);
-
-      // ⛔ Prevent re-starting when parent re-renders same image
-      if (playerRef.current.clipId === currentClip.id) return;
-      playerRef.current.clipId = currentClip.id;
-
-      if (isPlaying) {
-        let elapsed = 0;
-        const startTime = Date.now();
-
-        imageIntervalRef.current = setInterval(() => {
-          const newElapsed = (Date.now() - startTime) / 1000;
-          elapsed = Math.min(newElapsed, visibleDuration);
-          setLocalTime(elapsed);
-          onTimeUpdateRef.current?.(elapsed, currentClip.id);
-
-          if (elapsed >= visibleDuration) {
-            clearInterval(imageIntervalRef.current);
-            onClipEndRef.current?.(currentClip.id);
-          }
-        }, 50);
-
-        // Backup timeout to ensure clip ends
-        imageTimeoutRef.current = setTimeout(() => {
-          onClipEndRef.current?.(currentClip.id);
-        }, visibleDuration * 1000);
-      }
-
-      return () => {
-        clearTimeout(imageTimeoutRef.current);
-        clearInterval(imageIntervalRef.current);
-      };
+      return;
     }
 
-    // 🎥 Handle video clips normally
+    // Handle video clips normally
     const currentSrc = player.currentSrc();
     const needsReload =
       !currentSrc ||
