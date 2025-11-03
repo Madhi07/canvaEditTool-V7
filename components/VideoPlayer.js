@@ -54,7 +54,7 @@ export default function VideoPlayer({
       autoplay: false,
       preload: "auto",
       fluid: true,
-      muted: false, // Start unmuted for better audio handling
+      muted: false,
       responsive: true,
     });
 

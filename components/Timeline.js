@@ -85,7 +85,7 @@ export default function Timeline({
         trimEnd: trimEndSnapshot,
       } = dragStartSnapshot;
 
-      // ✨ update preview X position for ghost clip
+      //  update preview X position for ghost clip
       setDragPreviewX(e.clientX);
 
       if (dragType === "move") {
