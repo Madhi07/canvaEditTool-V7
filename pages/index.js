@@ -1,5 +1,5 @@
 // pages/index.js
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import VideoPlayer from "../components/VideoPlayer";
 import Timeline from "../components/Timeline";
 import MediaUploader from "../components/MediaUploader";
@@ -8,7 +8,6 @@ import {
   extractThumbnailFromVideo,
   getImageThumbnail,
 } from "../utils/thumbnailExtractor";
-// audioSyncManager removed - using AudioPlayer component instead
 import AudioPlayer from "../components/AudioPlayer";
 
 export default function Home() {
@@ -35,6 +34,7 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [totalDuration, setTotalDuration] = useState(10);
   const [videoZoom, setVideoZoom] = useState(1);
+  const [seekAudio, setSeekAudio] = useState(0);
 
   const clipsRef = useRef(clips);
   useEffect(() => {
@@ -47,9 +47,9 @@ export default function Home() {
   // placeholder: central stop all audio hook — connect into AudioPlayer if needed
   const stopAllAudio = useCallback(() => {
     // If your AudioPlayer exposes a stopAll method, call it via ref here:
-    // audioPlayerRef.current?.stopAll?.();
+    audioPlayerRef.current?.stopAll?.();
     // For now just ensure playback flag false
-    setIsPlaying(false);
+    // setIsPlaying(false);
   }, []);
 
   // Load default video metadata + thumbnail for default clip
@@ -316,27 +316,30 @@ export default function Home() {
     setCurrentTime(clip.startTime);
     setIsPlaying(false);
     stopAllAudio();
+    setSeekAudio((t) => t + 1);
   };
+  const activeVisualType = (() => {
+    const visual = clips
+      .filter((c) => c.type === "video" || c.type === "image")
+      .find((c) => currentTime >= c.startTime && currentTime < c.endTime);
+    return visual?.type; // 'image' | 'video' | undefined
+  })();
 
   const handleSeek = (time, clipId = null) => {
+    const wasPlaying = isPlaying;
     setCurrentTime(time);
-
-    // optional: if you want to jump playback relative to a specific clip
     if (clipId) {
+      setSelectedClipId(clipId);
       const clickedClip = clipsRef.current.find((c) => c.id === clipId);
-      if (clickedClip) {
-        // Optionally log or adjust context
+      if (clickedClip)
         console.log(`Seeked inside clip: ${clickedClip.fileName}`);
-      }
     }
-
-    // If playback is ongoing, resume from new time
-    if (isPlaying) {
-      stopAllAudio();
-      setTimeout(() => setIsPlaying(true), 50);
-    } else {
-      stopAllAudio();
-    }
+    // stop elements immediately (don’t flip transport here)
+    audioPlayerRef.current?.stopAll?.();
+    // force AudioPlayer to re-seek its <audio> elements to the new offset
+    setSeekAudio((t) => t + 1);
+    // resume only if we were playing pre-seek
+    if (wasPlaying) setTimeout(() => setIsPlaying(true), 50);
   };
 
   const handlePlayPause = () => setIsPlaying((prev) => !prev);
@@ -430,9 +433,6 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [currentTime, totalDuration, selectedClipId, clips]);
 
-  // removed audioSyncManager useEffect — using AudioPlayer now
-  // This is where we previously synced/created audio elements per active clip.
-  // Now we'll compute activeAudioClips and pass them to the AudioPlayer component.
 
   // Automatically arrange visual clips sequentially (no gaps/overlaps)
   const autoReflowClips = (inputClips) => {
@@ -495,15 +495,16 @@ export default function Home() {
 
   // Compute all overlapping audio clips at the current timeline time.
   // This preserves your "echo" behavior: multiple audio clips overlapping will all be active.
-  const activeAudioClips = clips
-    .filter(
-      (clip) =>
-        clip.type === "audio" &&
-        currentTime >= clip.startTime &&
-        currentTime < Math.min(clip.endTime, totalDuration) // ✅ respect totalDuration limit
-    )
-    // Keep original track ordering so timeline layering matches playback layering
-    .sort((a, b) => (a.track ?? 0) - (b.track ?? 0));
+  const activeAudioClips = useMemo(() => {
+    return clips
+      .filter(
+        (clip) =>
+          clip.type === "audio" &&
+          currentTime >= clip.startTime &&
+          currentTime < Math.min(clip.endTime, totalDuration)
+      )
+      .sort((a, b) => (a.track ?? 0) - (b.track ?? 0));
+  }, [clips, currentTime, totalDuration]);
 
   // Render
   return (
@@ -551,6 +552,9 @@ export default function Home() {
           activeAudioClips={activeAudioClips}
           isPlaying={isPlaying}
           currentTime={currentTime}
+          seekAudio={seekAudio}
+          clips={clips}
+          activeVisualType={activeVisualType}
         />
 
         {/* Toolbar */}

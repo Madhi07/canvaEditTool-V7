@@ -27,6 +27,7 @@ export default function Timeline({
   const [dragStartX, setDragStartX] = useState(0);
   const [dragPreviewX, setDragPreviewX] = useState(0);
   const [hoverInsertTime, setHoverInsertTime] = useState(null);
+  const rafSeekRef = useRef(null);
 
   // FIX: Use an object to store the clip's state when the drag starts
   const [dragStartSnapshot, setDragStartSnapshot] = useState(null);
@@ -51,7 +52,7 @@ export default function Timeline({
 
     // Check if user clicked inside a clip
     const clickedClip = clips.find(
-      (c) => clickedTime >= c.startTime && clickedTime <= c.endTime
+      (c) => clickedTime >= c.startTime && clickedTime < c.endTime
     );
 
     onSeek(clickedTime, clickedClip?.id);
@@ -132,7 +133,12 @@ export default function Timeline({
         // Update indicator time
         setHoverInsertTime(nearestEdge);
 
-        onSeek(newStartTime + MIN_CLIP_DURATION);
+        if (!rafSeekRef.current) {
+          rafSeekRef.current = requestAnimationFrame(() => {
+            rafSeekRef.current = null;
+            onSeek(newStartTime);
+          });
+        }
       } else if (dragType === "trim-left") {
         if (clip.type === "image") {
           // 🖼 Extend or shrink the image duration by adjusting startTime
@@ -249,6 +255,10 @@ export default function Timeline({
         const clip = clips.find((c) => c.id === dragClipId);
         if (clip) handleDragEnd(clip.id, clip.startTime);
       }
+      if (rafSeekRef.current) {
+        cancelAnimationFrame(rafSeekRef.current);
+        rafSeekRef.current = null;
+      }
 
       setIsDragging(false);
       setDragType(null);
@@ -291,6 +301,16 @@ export default function Timeline({
   const handleZoomReset = () => {
     setZoomLevel(1);
   };
+
+  useEffect(() => {
+    return () => {
+      // Cleanup any pending requestAnimationFrame calls
+      if (rafSeekRef.current) {
+        cancelAnimationFrame(rafSeekRef.current);
+        rafSeekRef.current = null;
+      }
+    };
+  }, []);
 
   // Sync scrolling - only timeline scrolls, time markers follow
   useEffect(() => {
@@ -652,9 +672,20 @@ export default function Timeline({
                       width={clipWidth}
                       height={clipHeight - 10}
                       progress={
-                        (currentTime - clip.startTime) / clipTimelineDuration
+                        clipTimelineDuration > 0
+                          ? Math.max(
+                              0,
+                              Math.min(
+                                1,
+                                (currentTime - clip.startTime) /
+                                  clipTimelineDuration
+                              )
+                            )
+                          : 0
                       }
                       isSelected={isSelected}
+                      trimStart={clip.trimStart}
+                      trimEnd={clip.trimEnd}
                       color="#FFFFFF"
                     />
                   </div>

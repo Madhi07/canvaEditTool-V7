@@ -31,7 +31,6 @@ export default function VideoPlayer({
 
   const backgroundAudioRef = useRef(null);
 
-
   // Update refs when props change
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
@@ -98,50 +97,74 @@ export default function VideoPlayer({
     const player = playerRef.current;
     if (!player || !currentClip || !isPlayerReady) return;
 
-    // 🖼️ Handle image clips (simulate playback without seeking or re-triggering)
+    // 🖼 IMAGE: do nothing to player pipeline (no src swap).
     if (currentClip.type === "image") {
-      // Just pause the video player — image playback is managed globally
-      if (!player.paused()) player.pause();
+      // Pause exactly once; avoid pausing on every render
+      if (!player._imgPaused) {
+        if (!player.paused()) player.pause();
+        player._imgPaused = true;
+      }
       return;
     }
 
-    // Handle video clips normally
-    const currentSrc = player.currentSrc();
-    const needsReload =
-      !currentSrc ||
-      currentSrc !== currentClip.url ||
-      playerRef.current.clipId !== currentClip.id;
+    // Reset the "paused due to image" marker
+    player._imgPaused = false;
 
-    if (needsReload) {
-      player.pause();
+    // 🎞 VIDEO: change source ONLY if URL changed; otherwise keep in sync.
+    const getCurrentSourceUrl = () => {
+      const cs = player.currentSource && player.currentSource();
+      if (cs?.src) return cs.src;
+      try {
+        const s = player.src();
+        if (typeof s === "string" && s) return s;
+        if (Array.isArray(s) && s[0]?.src) return s[0].src;
+        if (s?.src) return s.src;
+      } catch {}
+      return "";
+    };
+
+    const currentSourceUrl = getCurrentSourceUrl();
+    const urlChanged =
+      !!currentClip.url && currentSourceUrl !== currentClip.url;
+
+    if (urlChanged) {
       playerRef.current.clipId = currentClip.id;
-
       player.src({
         src: currentClip.url,
         type: currentClip.mimeType || "video/mp4",
       });
 
-      player.one("canplay", () => {
-        const seekTime = Math.max(0, currentClip.relativeTime || 0);
-        player.currentTime(seekTime);
-
-        player.muted(false);
-        player.volume(1.0);
-
-        if (isPlaying) {
-          const playPromise = player.play();
-          if (playPromise !== undefined) {
-            playPromise.catch((err) => {
-              console.warn("Autoplay blocked:", err);
-            });
-          }
+      const seekTo = Math.max(0, currentClip.relativeTime || 0);
+      const onReady = () => {
+        player.off("loadedmetadata", onReady);
+        if (Math.abs((player.currentTime() ?? 0) - seekTo) > 0.02) {
+          player.currentTime(seekTo);
         }
-      });
-    } else if (!isPlaying) {
-      const currentPlayerTime = player.currentTime();
+        if (isPlaying) {
+          const p = player.play();
+          if (p?.catch) p.catch(() => {});
+        }
+      };
+
+      if (player.readyState() >= 1) onReady();
+      else player.one("loadedmetadata", onReady);
+    } else {
+      // Same URL: NO reload. Gentle drift correction only.
       const targetTime = Math.max(0, currentClip.relativeTime || 0);
-      if (Math.abs(currentPlayerTime - targetTime) > 0.1) {
-        player.currentTime(targetTime);
+      const drift = Math.abs((player.currentTime() ?? 0) - targetTime);
+      if (drift > 0.1) player.currentTime(targetTime);
+
+      if (isPlaying) {
+        if (player.paused()) {
+          const p = player.play();
+          if (p?.catch) p.catch(() => {});
+        }
+      } else {
+        if (!player.paused()) player.pause();
+      }
+
+      if (playerRef.current.clipId !== currentClip.id) {
+        playerRef.current.clipId = currentClip.id;
       }
     }
   }, [
@@ -231,7 +254,7 @@ export default function VideoPlayer({
             transformOrigin: "center",
           }}
         >
-          {/* 🧱 Always keep video element mounted for video.js stability */}
+          {/* Always keep video element mounted for video.js stability */}
           <video
             ref={videoRef}
             className="video-js vjs-default-skin w-full h-full object-contain absolute inset-0"
@@ -239,7 +262,7 @@ export default function VideoPlayer({
             preload="auto"
           />
 
-          {/* 🖼️ Show image overlay if current clip is an image */}
+          {/* Show image overlay if current clip is an image */}
           {currentClip?.type === "image" && (
             <img
               src={currentClip.url}
