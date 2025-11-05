@@ -19,7 +19,7 @@ export default function VideoPlayer({
   const [localTime, setLocalTime] = useState(0);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [audioContext, setAudioContext] = useState(null);
-  const safeZoom = Math.min(Math.max(zoom, 0.5), 2);
+  const safeZoom = Math.min(Math.max(zoom, 0.5), 3);
 
   // Refs to hold the latest callbacks
   const onTimeUpdateRef = useRef(onTimeUpdate);

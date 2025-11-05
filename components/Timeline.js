@@ -46,7 +46,15 @@ export default function Timeline({
     const rect = timelineRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const time = x / pixelsPerSecond;
-    onSeek(Math.max(0, Math.min(time, totalDuration)));
+
+    const clickedTime = Math.max(0, Math.min(time, totalDuration));
+
+    // Check if user clicked inside a clip
+    const clickedClip = clips.find(
+      (c) => clickedTime >= c.startTime && clickedTime <= c.endTime
+    );
+
+    onSeek(clickedTime, clickedClip?.id);
   };
 
   // Drag handlers
@@ -412,7 +420,7 @@ export default function Timeline({
   };
 
   return (
-    <div className="bg-white">
+    <div className="bg-white select-none">
       {/* Zoom Controls */}
       <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200">
         <div className="flex items-center gap-2">
@@ -697,4 +705,3 @@ export default function Timeline({
     </div>
   );
 }
-

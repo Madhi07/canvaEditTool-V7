@@ -83,3 +83,16 @@ body {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
+
+.clip-floating {
+  position: absolute !important;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.85;
+  transform: scale(1.05);
+  transition: transform 0.1s ease, opacity 0.2s ease;
+}
+
+.clip-snapping {
+  outline: 2px dashed rgba(99, 102, 241, 0.6);
+}

@@ -102,9 +102,13 @@ export default function Home() {
   useEffect(() => {
     if (!clips.length) return;
 
-    const visualClips = clips.filter((c) => c.type === "video" || c.type === "image");
+    const visualClips = clips.filter(
+      (c) => c.type === "video" || c.type === "image"
+    );
     const maxVisualEnd =
-      visualClips.length > 0 ? Math.max(...visualClips.map((c) => c.endTime)) : 0;
+      visualClips.length > 0
+        ? Math.max(...visualClips.map((c) => c.endTime))
+        : 0;
 
     setTotalDuration(maxVisualEnd);
   }, [clips]);
@@ -116,9 +120,14 @@ export default function Home() {
         .filter((c) => c.type === "video" || c.type === "image")
         .sort((a, b) => a.startTime - b.startTime);
 
-      const currentVisualIndex = visualClips.findIndex((c) => c.id === endedClipId);
+      const currentVisualIndex = visualClips.findIndex(
+        (c) => c.id === endedClipId
+      );
 
-      if (currentVisualIndex !== -1 && currentVisualIndex < visualClips.length - 1) {
+      if (
+        currentVisualIndex !== -1 &&
+        currentVisualIndex < visualClips.length - 1
+      ) {
         const nextClip = visualClips[currentVisualIndex + 1];
 
         setSelectedClipId(nextClip.id);
@@ -144,7 +153,10 @@ export default function Home() {
     const getDuration = () =>
       new Promise((resolve) => {
         if (type === "image") return resolve(3);
-        const media = type === "video" ? document.createElement("video") : document.createElement("audio");
+        const media =
+          type === "video"
+            ? document.createElement("video")
+            : document.createElement("audio");
         media.src = url;
         media.onloadedmetadata = () => resolve(media.duration || 0);
       });
@@ -154,12 +166,20 @@ export default function Home() {
     let startTime = 0;
     let track = 0;
     if (type === "video" || type === "image") {
-      const visualClips = clipsRef.current.filter((c) => c.type === "video" || c.type === "image");
-      startTime = visualClips.length > 0 ? Math.max(...visualClips.map((c) => c.endTime)) : 0;
+      const visualClips = clipsRef.current.filter(
+        (c) => c.type === "video" || c.type === "image"
+      );
+      startTime =
+        visualClips.length > 0
+          ? Math.max(...visualClips.map((c) => c.endTime))
+          : 0;
       track = 0;
     } else if (type === "audio") {
       const audioClips = clipsRef.current.filter((c) => c.type === "audio");
-      startTime = audioClips.length > 0 ? Math.max(...audioClips.map((c) => c.endTime)) : 0;
+      startTime =
+        audioClips.length > 0
+          ? Math.max(...audioClips.map((c) => c.endTime))
+          : 0;
 
       // Find the lowest free audio track (layering)
       const usedTracks = new Set(audioClips.map((c) => c.track));
@@ -170,7 +190,8 @@ export default function Home() {
 
     let thumbnail = null;
     try {
-      if (type === "video") thumbnail = await extractThumbnailFromVideo(file, 1);
+      if (type === "video")
+        thumbnail = await extractThumbnailFromVideo(file, 1);
       else if (type === "image") thumbnail = await getImageThumbnail(file);
       if (thumbnail) new Image().src = thumbnail;
     } catch (error) {
@@ -207,9 +228,14 @@ export default function Home() {
 
       const clip = updated[index];
 
-      if (splitTime <= clip.startTime + 0.05 || splitTime >= clip.endTime - 0.05) return updated;
+      if (
+        splitTime <= clip.startTime + 0.05 ||
+        splitTime >= clip.endTime - 0.05
+      )
+        return updated;
 
-      const totalVisibleDuration = clip.duration - clip.trimStart - clip.trimEnd;
+      const totalVisibleDuration =
+        clip.duration - clip.trimStart - clip.trimEnd;
       const splitOffset = splitTime - clip.startTime;
       const splitRelative = clip.trimStart + splitOffset;
 
@@ -253,7 +279,9 @@ export default function Home() {
       if (!placed) layers.push([clip]);
     });
 
-    const layered = layers.flatMap((layer, i) => layer.map((clip) => ({ ...clip, track: i })));
+    const layered = layers.flatMap((layer, i) =>
+      layer.map((clip) => ({ ...clip, track: i }))
+    );
 
     return clipsArr.map((c) => {
       const match = layered.find((a) => a.id === c.id);
@@ -269,8 +297,14 @@ export default function Home() {
   // Timeline & Player handlers
   const handleClipUpdate = (clipId, updates) => {
     setClips((prev) => {
-      const updated = prev.map((c) => (c.id === clipId ? { ...c, ...updates } : c));
-      if (updates.trimStart !== undefined || updates.trimEnd !== undefined || updates.startTime !== undefined) {
+      const updated = prev.map((c) =>
+        c.id === clipId ? { ...c, ...updates } : c
+      );
+      if (
+        updates.trimStart !== undefined ||
+        updates.trimEnd !== undefined ||
+        updates.startTime !== undefined
+      ) {
         return autoReflowClips(updated);
       }
       return updated;
@@ -284,10 +318,25 @@ export default function Home() {
     stopAllAudio();
   };
 
-  const handleSeek = (time) => {
+  const handleSeek = (time, clipId = null) => {
     setCurrentTime(time);
-    setIsPlaying(false);
-    stopAllAudio();
+
+    // optional: if you want to jump playback relative to a specific clip
+    if (clipId) {
+      const clickedClip = clipsRef.current.find((c) => c.id === clipId);
+      if (clickedClip) {
+        // Optionally log or adjust context
+        console.log(`Seeked inside clip: ${clickedClip.fileName}`);
+      }
+    }
+
+    // If playback is ongoing, resume from new time
+    if (isPlaying) {
+      stopAllAudio();
+      setTimeout(() => setIsPlaying(true), 50);
+    } else {
+      stopAllAudio();
+    }
   };
 
   const handlePlayPause = () => setIsPlaying((prev) => !prev);
@@ -300,10 +349,13 @@ export default function Home() {
     const relativeTime = Math.max(0, timeSec - currentClip.trimStart);
     const globalTime = currentClip.startTime + relativeTime;
 
-    if (globalTime < currentClip.endTime) {
+    const epsilon = 0.05; // 50ms tolerance to avoid stopping early
+
+    if (globalTime < currentClip.endTime - epsilon) {
       setCurrentTime(globalTime);
-    } else if (globalTime >= currentClip.endTime && isPlaying) {
-      // failsafe if ended event missed
+    } else if (globalTime >= currentClip.endTime - epsilon && isPlaying) {
+      // Snap exactly to the clip’s end and trigger stop
+      setCurrentTime(currentClip.endTime);
       handleClipEnd(currentClip.id);
     }
   };
@@ -314,7 +366,9 @@ export default function Home() {
       .filter((c) => c.type === "video" || c.type === "image")
       .sort((a, b) => a.startTime - b.startTime);
 
-    let activeClip = visualClips.find((c) => currentTime >= c.startTime && currentTime < c.endTime);
+    let activeClip = visualClips.find(
+      (c) => currentTime >= c.startTime && currentTime < c.endTime
+    );
 
     if (!activeClip && currentTime >= totalDuration && visualClips.length > 0) {
       activeClip = visualClips[visualClips.length - 1];
@@ -322,8 +376,12 @@ export default function Home() {
 
     if (!activeClip) return null;
 
-    const relativeTime = Math.max(0, currentTime - activeClip.startTime + activeClip.trimStart);
-    const maxRelativeTime = activeClip.duration - activeClip.trimStart - activeClip.trimEnd;
+    const relativeTime = Math.max(
+      0,
+      currentTime - activeClip.startTime + activeClip.trimStart
+    );
+    const maxRelativeTime =
+      activeClip.duration - activeClip.trimStart - activeClip.trimEnd;
     const clampedRelativeTime = Math.min(relativeTime, maxRelativeTime);
 
     return {
@@ -357,7 +415,11 @@ export default function Home() {
         e.preventDefault();
         const newTime = Math.min(totalDuration, currentTime + 1);
         handleSeek(newTime);
-      } else if (e.code === "Delete" && selectedClipId && e.target.tagName !== "INPUT") {
+      } else if (
+        e.code === "Delete" &&
+        selectedClipId &&
+        e.target.tagName !== "INPUT"
+      ) {
         e.preventDefault();
         setClips((prev) => prev.filter((clip) => clip.id !== selectedClipId));
         setSelectedClipId(null);
@@ -392,7 +454,9 @@ export default function Home() {
       };
     });
 
-    const nonVisuals = inputClips.filter((c) => c.type !== "video" && c.type !== "image");
+    const nonVisuals = inputClips.filter(
+      (c) => c.type !== "video" && c.type !== "image"
+    );
     return [...adjusted, ...nonVisuals];
   };
 
@@ -400,7 +464,9 @@ export default function Home() {
   useEffect(() => {
     if (!isPlaying) return;
 
-    const activeClip = clips.find((clip) => currentTime >= clip.startTime && currentTime < clip.endTime);
+    const activeClip = clips.find(
+      (clip) => currentTime >= clip.startTime && currentTime < clip.endTime
+    );
     if (!activeClip) return;
 
     if (activeClip.type === "image") {
@@ -410,7 +476,9 @@ export default function Home() {
           if (nextTime >= activeClip.endTime) {
             clearInterval(interval);
 
-            const nextClip = clips.find((c) => c.startTime >= activeClip.endTime);
+            const nextClip = clips.find(
+              (c) => c.startTime >= activeClip.endTime
+            );
             if (nextClip) {
               setCurrentTime(nextClip.startTime);
               setTimeout(() => setIsPlaying(true), 50);
@@ -428,7 +496,12 @@ export default function Home() {
   // Compute all overlapping audio clips at the current timeline time.
   // This preserves your "echo" behavior: multiple audio clips overlapping will all be active.
   const activeAudioClips = clips
-    .filter((clip) => clip.type === "audio" && currentTime >= clip.startTime && currentTime < clip.endTime)
+    .filter(
+      (clip) =>
+        clip.type === "audio" &&
+        currentTime >= clip.startTime &&
+        currentTime < Math.min(clip.endTime, totalDuration) // ✅ respect totalDuration limit
+    )
     // Keep original track ordering so timeline layering matches playback layering
     .sort((a, b) => (a.track ?? 0) - (b.track ?? 0));
 
@@ -482,7 +555,12 @@ export default function Home() {
 
         {/* Toolbar */}
         <div className="rounded-xl bg-white p-4 shadow-md border border-gray-200 flex justify-between items-center">
-          <Toolbar currentTime={currentTime} totalDuration={totalDuration} videoZoom={videoZoom} setVideoZoom={setVideoZoom} />
+          <Toolbar
+            currentTime={currentTime}
+            totalDuration={totalDuration}
+            videoZoom={videoZoom}
+            setVideoZoom={setVideoZoom}
+          />
         </div>
       </div>
     </div>
