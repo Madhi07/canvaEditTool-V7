@@ -1,8 +1,13 @@
 // components/AudioPlayer.js
-import React, { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
+import React, {
+  useEffect,
+  useRef,
+  forwardRef,
+  useImperativeHandle,
+} from "react";
 
-const SYNC_TOLERANCE = 0.05;               // For discrete seek corrections
-const DRIFT_CORRECT_WHILE_PLAYING = 0.25;  // Correct only if >= 250ms during continuous play
+const SYNC_TOLERANCE = 0.05;               // used for discrete seek corrections (not heavy-used now)
+const DRIFT_CORRECT_WHILE_PLAYING = 0.30;  // correct only if >= 300ms during continuous video playback
 
 function computeVisibleLen(clip) {
   const dur = Math.max(0, Number(clip.duration) || 0);
@@ -13,7 +18,7 @@ function computeVisibleLen(clip) {
 
 function isInsideWindow(clip, t) {
   const visibleLen = computeVisibleLen(clip);
-  const end = (clip.endTime ?? (clip.startTime + visibleLen));
+  const end = clip.endTime ?? clip.startTime + visibleLen;
   return t >= clip.startTime && t < end && visibleLen > 0;
 }
 
@@ -23,7 +28,10 @@ function desiredAssetOffset(clip, timelineTime) {
   const local = timelineTime - clip.startTime;
   const target = (clip.trimStart || 0) + local;
   // clamp to last frame inside trimmed region
-  return Math.max(0, Math.min(target, (clip.trimStart || 0) + visibleLen - 0.001));
+  return Math.max(
+    0,
+    Math.min(target, (clip.trimStart || 0) + visibleLen - 0.001)
+  );
 }
 
 const AudioPlayer = forwardRef(function AudioPlayer(
@@ -33,31 +41,38 @@ const AudioPlayer = forwardRef(function AudioPlayer(
     isPlaying,             // transport play/pause
     seekAudio,             // bump when user performs a discrete seek/jump
     masterVolume = 1,      // optional
-    activeVisualType,      // 'image' | 'video' | undefined  <-- NEW
+    activeVisualType,      // 'image' | 'video' | undefined
   },
   ref
 ) {
-  const audioMapRef = useRef(new Map()); // id -> { audio }
+  const audioMapRef = useRef(new Map());        // id -> { audio }
   const lastSeekAudioRef = useRef(seekAudio);
-  const prevInsideMapRef = useRef(new Map()); // clipId -> wasInside(Boolean)
+  const prevInsideMapRef = useRef(new Map());   // clipId -> wasInside(Boolean)
   const lastBigCorrectionAtRef = useRef(0);
+  const prevVisualTypeRef = useRef(activeVisualType); // track image -> video crossings
 
   // Expose imperative controls
-  useImperativeHandle(ref, () => ({
-    stopAll() {
-      const map = audioMapRef.current;
-      for (const { audio } of map.values()) {
-        try { audio.pause(); } catch {}
-      }
-    },
-    setMasterVolume(v) {
-      const vol = Math.max(0, Math.min(1, v));
-      const map = audioMapRef.current;
-      for (const { audio } of map.values()) {
-        audio.volume = vol * (audio.__clipGain ?? 1);
-      }
-    }
-  }), []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      stopAll() {
+        const map = audioMapRef.current;
+        for (const { audio } of map.values()) {
+          try {
+            audio.pause();
+          } catch {}
+        }
+      },
+      setMasterVolume(v) {
+        const vol = Math.max(0, Math.min(1, v));
+        const map = audioMapRef.current;
+        for (const { audio } of map.values()) {
+          audio.volume = vol * (audio.__clipGain ?? 1);
+        }
+      },
+    }),
+    []
+  );
 
   // Ensure audio elements exist for every audio clip and keep them updated
   useEffect(() => {
@@ -67,7 +82,7 @@ const AudioPlayer = forwardRef(function AudioPlayer(
     for (const clip of clips) {
       if (clip.type !== "audio") continue;
 
-      const clipGain = (clip.gain != null ? clip.gain : 1);
+      const clipGain = clip.gain != null ? clip.gain : 1;
 
       if (!map.has(clip.id)) {
         const el = new Audio();
@@ -83,17 +98,21 @@ const AudioPlayer = forwardRef(function AudioPlayer(
         el.__clipGain = clipGain;
         el.volume = clipGain * masterVolume;
         if (el.src !== clip.url) {
-          try { el.pause(); } catch {}
+          try {
+            el.pause();
+          } catch {}
           el.src = clip.url;
         }
       }
     }
 
-    // remove elements for deleted audio clips
+    // Remove elements for deleted audio clips
     for (const [id, entry] of map.entries()) {
-      const stillExists = clips.some(c => c.type === "audio" && c.id === id);
+      const stillExists = clips.some((c) => c.type === "audio" && c.id === id);
       if (!stillExists) {
-        try { entry.audio.pause(); } catch {}
+        try {
+          entry.audio.pause();
+        } catch {}
         entry.audio.src = "";
         map.delete(id);
         prevInsideMapRef.current.delete(id);
@@ -109,10 +128,14 @@ const AudioPlayer = forwardRef(function AudioPlayer(
     const isDiscreteSeek = lastSeekAudioRef.current !== seekAudio;
     if (isDiscreteSeek) lastSeekAudioRef.current = seekAudio;
 
-    // During image playback, avoid continuous drift corrections (step-wise timer)
-    const allowContinuousCorrection = isPlaying && activeVisualType !== 'image';
+    // During image playback, avoid continuous drift corrections (step-wise timer drives timeline)
+    const allowContinuousCorrection = isPlaying && activeVisualType !== "image";
 
-    const audioClips = clips.filter(c => c.type === "audio");
+    // Detect image -> video transition this tick
+    const enteringVideoFromImage =
+      prevVisualTypeRef.current === "image" && activeVisualType === "video";
+
+    const audioClips = clips.filter((c) => c.type === "audio");
 
     for (const clip of audioClips) {
       const entry = map.get(clip.id);
@@ -134,16 +157,18 @@ const AudioPlayer = forwardRef(function AudioPlayer(
 
       const doSeekAndMaybePlay = () => {
         const now = performance.now();
-        const entering = !wasInside && inside; // just entered this clip window
-        const bigDrift = allowContinuousCorrection &&
-                         drift >= DRIFT_CORRECT_WHILE_PLAYING &&
-                         (now - lastBigCorrectionAtRef.current > 200);
+        const entering = !wasInside && inside; // just entered this audio window
+        const bigDrift =
+          allowContinuousCorrection &&
+          drift >= DRIFT_CORRECT_WHILE_PLAYING &&
+          now - lastBigCorrectionAtRef.current > 200;
 
-        // Only hard-seek when it really matters to avoid crackle:
+        // Hard-align when it matters to avoid crackle:
         //  - explicit user seek (seekAudio bump)
         //  - entering the clip window
         //  - large drift during continuous playback (when visual is NOT an image)
-        if (isDiscreteSeek || entering || bigDrift) {
+        //  - image → video switch (keeps audio in lockstep with freshly resumed video)
+        if (isDiscreteSeek || entering || bigDrift || enteringVideoFromImage) {
           const safeTarget = Math.max(
             0,
             Math.min(target, Math.max(0, (el.duration || target) - 0.001))
@@ -176,12 +201,15 @@ const AudioPlayer = forwardRef(function AudioPlayer(
 
     // Safety: pause any non-window clip that might still be playing
     for (const [id, entry] of map.entries()) {
-      const clip = audioClips.find(c => c.id === id);
+      const clip = audioClips.find((c) => c.id === id);
       if (!clip) continue;
       if (!isInsideWindow(clip, currentTime) && !entry.audio.paused) {
         entry.audio.pause();
       }
     }
+
+    // remember current visual type for next tick (for image → video detection)
+    prevVisualTypeRef.current = activeVisualType;
   }, [clips, currentTime, isPlaying, seekAudio, activeVisualType]);
 
   // Cleanup on unmount
@@ -189,7 +217,9 @@ const AudioPlayer = forwardRef(function AudioPlayer(
     return () => {
       const map = audioMapRef.current;
       for (const { audio } of map.values()) {
-        try { audio.pause(); } catch {}
+        try {
+          audio.pause();
+        } catch {}
         audio.src = "";
       }
       map.clear();

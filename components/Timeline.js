@@ -44,29 +44,57 @@ export default function Timeline({
   // Handle click to seek
   const handleTimelineClick = (e) => {
     if (!timelineRef.current || isDragging) return;
+
     const rect = timelineRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const time = x / pixelsPerSecond;
-
-    const clickedTime = Math.max(0, Math.min(time, totalDuration));
-
-    // Check if user clicked inside a clip
-    const clickedClip = clips.find(
-      (c) => clickedTime >= c.startTime && clickedTime < c.endTime
+    const y = e.clientY - rect.top;
+    const clickedTime = Math.max(
+      0,
+      Math.min(x / pixelsPerSecond, totalDuration)
     );
 
-    onSeek(clickedTime, clickedClip?.id);
+    // Height assumptions (adjust based on your layout CSS)
+    const videoTrackHeight = 80; // Height where video/image clips are placed
+    const audioTrackStartY = videoTrackHeight; // Y position where audio track starts
+
+    // ✅ If click is in AUDIO track area
+    if (y > audioTrackStartY) {
+      const clickedAudioClip = clips.find(
+        (c) =>
+          c.type === "audio" &&
+          clickedTime >= c.startTime &&
+          clickedTime < c.endTime
+      );
+
+      if (clickedAudioClip) {
+        onClipSelect(clickedAudioClip);
+        onSeek(clickedTime, clickedAudioClip.id);
+        return;
+      }
+    }
+
+    // ✅ Otherwise treat as VISUAL seek (video/image)
+    const clickedVisualClip = clips.find(
+      (c) =>
+        (c.type === "video" || c.type === "image") &&
+        clickedTime >= c.startTime &&
+        clickedTime < c.endTime
+    );
+
+    if (clickedVisualClip) {
+      onClipSelect(clickedVisualClip);
+    }
+    onSeek(clickedTime, clickedVisualClip?.id || null);
   };
 
-  // Drag handlers
   const handleClipMouseDown = (e, clip, type) => {
-    e.stopPropagation();
+    e.stopPropagation(); // don’t trigger timeline seek
     setIsDragging(true);
-    setDragType(type);
+    setDragType(type); // "move" | "trim-left" | "trim-right"
     setDragClipId(clip.id);
     setDragStartX(e.clientX);
 
-    // FIX: Store a snapshot of the clip's state at the *start* of the drag
+    // snapshot the clip state at drag start
     setDragStartSnapshot({
       startTime: clip.startTime,
       endTime: clip.endTime,
@@ -74,7 +102,8 @@ export default function Timeline({
       trimEnd: clip.trimEnd,
     });
 
-    onClipSelect(clip); // Select the clip when dragging starts
+    // ensure selection reflects the thing you grabbed (important for Delete)
+    onClipSelect(clip);
   };
 
   // ✅ Global drag listeners wrapped in useEffect
@@ -568,7 +597,7 @@ export default function Timeline({
               }}
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 0.8, scale: 1.05 }}
-              transition={{ type: "spring", stiffness: 120, damping: 10 }}
+              transition={{ type: "spring", stiffness: 120, damping: 18 }}
             >
               <div className="flex items-center justify-center h-full text-white text-sm font-medium">
                 Moving...

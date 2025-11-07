@@ -35,7 +35,8 @@ export default function Home() {
   const [totalDuration, setTotalDuration] = useState(10);
   const [videoZoom, setVideoZoom] = useState(1);
   const [seekAudio, setSeekAudio] = useState(0);
-
+  const EPS = 0.001;
+  const justSeekedIntoImageRef = useRef(false);
   const clipsRef = useRef(clips);
   useEffect(() => {
     clipsRef.current = clips;
@@ -120,25 +121,21 @@ export default function Home() {
         .filter((c) => c.type === "video" || c.type === "image")
         .sort((a, b) => a.startTime - b.startTime);
 
-      const currentVisualIndex = visualClips.findIndex(
-        (c) => c.id === endedClipId
-      );
+      const idx = visualClips.findIndex((c) => c.id === endedClipId);
 
-      if (
-        currentVisualIndex !== -1 &&
-        currentVisualIndex < visualClips.length - 1
-      ) {
-        const nextClip = visualClips[currentVisualIndex + 1];
+      if (idx !== -1 && idx < visualClips.length - 1) {
+        const nextClip = visualClips[idx + 1];
 
         setSelectedClipId(nextClip.id);
-        setCurrentTime(nextClip.startTime);
+        // Nudge into the clip to avoid falling on boundary
+        const startInside =
+          nextClip.type === "image"
+            ? nextClip.startTime + EPS
+            : nextClip.startTime;
+        setCurrentTime(startInside);
 
-        // Continue playback
-        if (isPlaying) {
-          setTimeout(() => setIsPlaying(true), 50);
-        }
+        if (isPlaying) setTimeout(() => setIsPlaying(true), 50);
       } else {
-        // End of timeline
         setIsPlaying(false);
         stopAllAudio();
       }
@@ -294,20 +291,25 @@ export default function Home() {
     setClips(fixed);
   };
 
-  // Timeline & Player handlers
   const handleClipUpdate = (clipId, updates) => {
     setClips((prev) => {
+      const target = prev.find((c) => c.id === clipId);
+      if (!target) return prev;
+
+      // Apply the field updates
       const updated = prev.map((c) =>
         c.id === clipId ? { ...c, ...updates } : c
       );
-      if (
+
+    
+      const affectsTimeline =
+        updates.startTime !== undefined ||
         updates.trimStart !== undefined ||
-        updates.trimEnd !== undefined ||
-        updates.startTime !== undefined
-      ) {
-        return autoReflowClips(updated);
-      }
-      return updated;
+        updates.trimEnd !== undefined;
+
+      const shouldReflow = target.type === "video" && affectsTimeline;
+
+      return shouldReflow ? autoReflowClips(updated) : updated;
     });
   };
 
@@ -327,18 +329,44 @@ export default function Home() {
 
   const handleSeek = (time, clipId = null) => {
     const wasPlaying = isPlaying;
-    setCurrentTime(time);
+    const clamped = Math.max(0, Math.min(time, totalDuration - EPS));
+
+    // Figure out which visual we’re seeking into
+    const visuals = clipsRef.current
+      .filter((c) => c.type === "video" || c.type === "image")
+      .sort((a, b) => a.startTime - b.startTime);
+
+    let targetClip = clipId
+      ? clipsRef.current.find((c) => c.id === clipId)
+      : visuals.find(
+          (c) => clamped >= c.startTime - EPS && clamped < c.endTime - EPS
+        );
+
+    // If we land on an IMAGE, nudge slightly inside the window and set the rAF guard
+    if (targetClip && targetClip.type === "image") {
+      const inside = Math.min(
+        targetClip.endTime - EPS,
+        Math.max(targetClip.startTime + EPS, clamped)
+      );
+      justSeekedIntoImageRef.current = true;
+      setCurrentTime(inside);
+    } else {
+      justSeekedIntoImageRef.current = false;
+      setCurrentTime(clamped);
+    }
+
     if (clipId) {
       setSelectedClipId(clipId);
       const clickedClip = clipsRef.current.find((c) => c.id === clipId);
       if (clickedClip)
         console.log(`Seeked inside clip: ${clickedClip.fileName}`);
     }
-    // stop elements immediately (don’t flip transport here)
+
+    // Stop audio immediately, then force re-seek
     audioPlayerRef.current?.stopAll?.();
-    // force AudioPlayer to re-seek its <audio> elements to the new offset
     setSeekAudio((t) => t + 1);
-    // resume only if we were playing pre-seek
+
+    // Resume only if we were playing pre-seek
     if (wasPlaying) setTimeout(() => setIsPlaying(true), 50);
   };
 
@@ -369,23 +397,31 @@ export default function Home() {
       .filter((c) => c.type === "video" || c.type === "image")
       .sort((a, b) => a.startTime - b.startTime);
 
+    // inclusive start, exclusive end with epsilon guards
     let activeClip = visualClips.find(
-      (c) => currentTime >= c.startTime && currentTime < c.endTime
+      (c) => currentTime >= c.startTime - EPS && currentTime < c.endTime - EPS
     );
 
-    if (!activeClip && currentTime >= totalDuration && visualClips.length > 0) {
+    // If we're exactly at the very end, snap to the last visual
+    if (
+      !activeClip &&
+      currentTime >= totalDuration - EPS &&
+      visualClips.length
+    ) {
       activeClip = visualClips[visualClips.length - 1];
     }
-
     if (!activeClip) return null;
 
     const relativeTime = Math.max(
       0,
       currentTime - activeClip.startTime + activeClip.trimStart
     );
-    const maxRelativeTime =
+    const maxRel =
       activeClip.duration - activeClip.trimStart - activeClip.trimEnd;
-    const clampedRelativeTime = Math.min(relativeTime, maxRelativeTime);
+    const clampedRelativeTime = Math.min(
+      relativeTime,
+      Math.max(0, maxRel - EPS)
+    );
 
     return {
       id: activeClip.id,
@@ -407,32 +443,47 @@ export default function Home() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.code === "Space" && e.target.tagName !== "INPUT") {
+      const tag = (e.target.tagName || "").toUpperCase();
+      const isEditable =
+        e.target.isContentEditable ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        tag === "BUTTON";
+
+      if (isEditable) return; // don't hijack typing
+
+      if (e.code === "Space") {
         e.preventDefault();
         handlePlayPause();
-      } else if (e.code === "ArrowLeft" && e.target.tagName !== "INPUT") {
+        return;
+      }
+
+      if (e.code === "ArrowLeft") {
         e.preventDefault();
         const newTime = Math.max(0, currentTime - 1);
         handleSeek(newTime);
-      } else if (e.code === "ArrowRight" && e.target.tagName !== "INPUT") {
+        return;
+      }
+
+      if (e.code === "ArrowRight") {
         e.preventDefault();
         const newTime = Math.min(totalDuration, currentTime + 1);
         handleSeek(newTime);
-      } else if (
-        e.code === "Delete" &&
-        selectedClipId &&
-        e.target.tagName !== "INPUT"
-      ) {
+        return;
+      }
+
+      if ((e.code === "Delete" || e.code === "Backspace") && selectedClipId) {
         e.preventDefault();
         setClips((prev) => prev.filter((clip) => clip.id !== selectedClipId));
         setSelectedClipId(null);
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentTime, totalDuration, selectedClipId, clips]);
-
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, [currentTime, totalDuration, selectedClipId]);
 
   // Automatically arrange visual clips sequentially (no gaps/overlaps)
   const autoReflowClips = (inputClips) => {
@@ -460,40 +511,67 @@ export default function Home() {
     return [...adjusted, ...nonVisuals];
   };
 
-  // Image clip playback: when isPlaying and active clip is image, advance time manually
+  // Image clip playback: drive timeline with rAF (stable, no skips)
   useEffect(() => {
     if (!isPlaying) return;
 
-    const activeClip = clips.find(
-      (clip) => currentTime >= clip.startTime && currentTime < clip.endTime
-    );
-    if (!activeClip) return;
+    let rafId;
+    let last = performance.now();
 
-    if (activeClip.type === "image") {
-      const interval = setInterval(() => {
-        setCurrentTime((prev) => {
-          const nextTime = prev + 0.05; // 20 FPS step
-          if (nextTime >= activeClip.endTime) {
-            clearInterval(interval);
+    const tick = (now) => {
+      let dt = (now - last) / 1000;
 
-            const nextClip = clips.find(
-              (c) => c.startTime >= activeClip.endTime
-            );
-            if (nextClip) {
-              setCurrentTime(nextClip.startTime);
-              setTimeout(() => setIsPlaying(true), 50);
-            } else {
-              setIsPlaying(false);
-            }
+      // If we just sought into an image, zero out the first dt so we don't leap over it.
+      if (justSeekedIntoImageRef.current) {
+        justSeekedIntoImageRef.current = false;
+        last = now;
+        dt = 0;
+      } else {
+        // Cap dt to avoid big jumps after tab throttling (~60ms cap)
+        if (dt > 0.06) dt = 0.06;
+        last = now;
+      }
+
+      setCurrentTime((prev) => {
+        const freshClips = clipsRef.current;
+
+        const active = freshClips.find(
+          (c) => prev >= c.startTime - EPS && prev < c.endTime - EPS
+        );
+        if (!active || active.type !== "image") return prev;
+
+        const next = prev + dt;
+
+        if (next >= active.endTime - EPS) {
+          const nextClip = freshClips
+            .filter((c) => c.type === "video" || c.type === "image")
+            .sort((a, b) => a.startTime - b.startTime)
+            .find((c) => c.startTime >= active.endTime - EPS);
+
+          if (nextClip) {
+            const startInside =
+              nextClip.type === "image"
+                ? nextClip.startTime + EPS
+                : nextClip.startTime;
+            // keep transport going if we were already playing
+            setTimeout(() => setIsPlaying(true), 50);
+            return startInside;
+          } else {
+            setIsPlaying(false);
+            return active.endTime - EPS;
           }
-          return nextTime;
-        });
-      }, 50);
-      return () => clearInterval(interval);
-    }
-  }, [isPlaying, currentTime, clips]);
+        }
 
-  // Compute all overlapping audio clips at the current timeline time.
+        return next;
+      });
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, EPS, clipsRef]);
+
   // This preserves your "echo" behavior: multiple audio clips overlapping will all be active.
   const activeAudioClips = useMemo(() => {
     return clips
@@ -548,7 +626,7 @@ export default function Home() {
 
         {/* Audio player (hidden) - receives ALL overlapping audio clips */}
         <AudioPlayer
-          ref={audioPlayerRef} // optional: requires AudioPlayer to forwardRef if you want to call methods
+          // ref={audioPlayerRef} // optional: requires AudioPlayer to forwardRef if you want to call methods
           activeAudioClips={activeAudioClips}
           isPlaying={isPlaying}
           currentTime={currentTime}

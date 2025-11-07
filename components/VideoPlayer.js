@@ -21,17 +21,11 @@ export default function VideoPlayer({
   const [audioContext, setAudioContext] = useState(null);
   const safeZoom = Math.min(Math.max(zoom, 0.5), 3);
 
-  // Refs to hold the latest callbacks
+  // Refs to hold the latest callbacks/values
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onClipEndRef = useRef(onClipEnd);
   const currentClipRef = useRef(currentClip);
-  const lastSrcRef = useRef(null);
-  const imageTimeoutRef = useRef(null);
-  const imageIntervalRef = useRef(null);
 
-  const backgroundAudioRef = useRef(null);
-
-  // Update refs when props change
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
   }, [onTimeUpdate]);
@@ -44,7 +38,7 @@ export default function VideoPlayer({
     currentClipRef.current = currentClip;
   }, [currentClip]);
 
-  // Initialize player once
+  // Initialize Video.js once
   useEffect(() => {
     if (!videoRef.current || playerRef.current) return;
 
@@ -60,7 +54,6 @@ export default function VideoPlayer({
     playerRef.current = player;
     setIsPlayerReady(true);
 
-    // Update current time
     player.on("timeupdate", () => {
       const time = player.currentTime();
       setLocalTime(time);
@@ -69,21 +62,18 @@ export default function VideoPlayer({
       }
     });
 
-    // Move to next clip when ended
     player.on("ended", () => {
       if (onClipEndRef.current && currentClipRef.current) {
         onClipEndRef.current(currentClipRef.current.id);
       }
     });
 
-    // Handle player errors
-    player.on("error", (e) => {
-      console.warn("Video player error:", player.error());
+    player.on("error", () => {
+      const err = player.error();
+      if (err) console.warn("Video player error:", err);
     });
 
-    // Ensure audio context is properly initialized
     player.on("play", () => {
-      // Resume audio context if suspended (required by some browsers)
       if (audioContext && audioContext.state === "suspended") {
         audioContext.resume().catch((err) => {
           console.warn("Failed to resume audio context:", err);
@@ -92,14 +82,64 @@ export default function VideoPlayer({
     });
   }, [audioContext]);
 
-  // EFFECT 1: Load new clip OR Seek when timeline position changes
+  // Helper: current source URL from player
+  const getCurrentSourceUrl = () => {
+    const p = playerRef.current;
+    if (!p) return "";
+    const cs = p.currentSource && p.currentSource();
+    if (cs?.src) return cs.src;
+    try {
+      const s = p.src();
+      if (typeof s === "string" && s) return s;
+      if (Array.isArray(s) && s[0]?.src) return s[0].src;
+      if (s?.src) return s.src;
+    } catch {}
+    return "";
+  };
+
+  // EFFECT A: PRIME next video *inside the main player* while an image is active
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !isPlayerReady || !currentClip) return;
+    if (currentClip.type !== "image") return;
+
+    // Find the very next *video* visual clip after this image
+    const nextVideo = (clips || [])
+      .filter(
+        (c) => c.type === "video" && c.startTime >= (currentClip.startTime ?? 0)
+      )
+      .sort((a, b) => a.startTime - b.startTime)[0];
+
+    if (!nextVideo || !nextVideo.url) return;
+
+    // If already primed with this url, skip
+    const currentSourceUrl = getCurrentSourceUrl();
+    if (currentSourceUrl === nextVideo.url) return;
+
+    // Prime: set the next video source now (under the image overlay), keep paused
+    playerRef.current.clipId = nextVideo.id;
+    player.src({
+      src: nextVideo.url,
+      type: nextVideo.mimeType || "video/mp4",
+    });
+
+    const onReady = () => {
+      player.off("loadedmetadata", onReady);
+      // keep paused; we’re only buffering
+      if (!player.paused()) player.pause();
+    };
+
+    if (player.readyState() >= 1) onReady();
+    else player.one("loadedmetadata", onReady);
+  }, [currentClip?.id, currentClip?.type, currentClip?.startTime, clips, isPlayerReady]);
+
+  // EFFECT B: Load/Seek for the active clip (no reload when already primed)
   useEffect(() => {
     const player = playerRef.current;
     if (!player || !currentClip || !isPlayerReady) return;
 
-    // 🖼 IMAGE: do nothing to player pipeline (no src swap).
     if (currentClip.type === "image") {
-      // Pause exactly once; avoid pausing on every render
+      // Pause exactly once while an image is visible
       if (!player._imgPaused) {
         if (!player.paused()) player.pause();
         player._imgPaused = true;
@@ -107,34 +147,21 @@ export default function VideoPlayer({
       return;
     }
 
-    // Reset the "paused due to image" marker
+    // back to video: lift the image pause marker
     player._imgPaused = false;
 
-    // 🎞 VIDEO: change source ONLY if URL changed; otherwise keep in sync.
-    const getCurrentSourceUrl = () => {
-      const cs = player.currentSource && player.currentSource();
-      if (cs?.src) return cs.src;
-      try {
-        const s = player.src();
-        if (typeof s === "string" && s) return s;
-        if (Array.isArray(s) && s[0]?.src) return s[0].src;
-        if (s?.src) return s.src;
-      } catch {}
-      return "";
-    };
-
     const currentSourceUrl = getCurrentSourceUrl();
-    const urlChanged =
-      !!currentClip.url && currentSourceUrl !== currentClip.url;
+    const urlChanged = !!currentClip.url && currentSourceUrl !== currentClip.url;
+    const seekTo = Math.max(0, currentClip.relativeTime || 0);
 
     if (urlChanged) {
+      // Only when jumping to a different video than what we primed
       playerRef.current.clipId = currentClip.id;
       player.src({
         src: currentClip.url,
         type: currentClip.mimeType || "video/mp4",
       });
 
-      const seekTo = Math.max(0, currentClip.relativeTime || 0);
       const onReady = () => {
         player.off("loadedmetadata", onReady);
         if (Math.abs((player.currentTime() ?? 0) - seekTo) > 0.02) {
@@ -146,13 +173,13 @@ export default function VideoPlayer({
         }
       };
 
+      // loadedmetadata is enough; using it avoids waiting for full buffering
       if (player.readyState() >= 1) onReady();
       else player.one("loadedmetadata", onReady);
     } else {
-      // Same URL: NO reload. Gentle drift correction only.
-      const targetTime = Math.max(0, currentClip.relativeTime || 0);
-      const drift = Math.abs((player.currentTime() ?? 0) - targetTime);
-      if (drift > 0.1) player.currentTime(targetTime);
+      // Same URL (likely primed): just drift-correct & play/pause
+      const drift = Math.abs((player.currentTime() ?? 0) - seekTo);
+      if (drift > 0.1) player.currentTime(seekTo);
 
       if (isPlaying) {
         if (player.paused()) {
@@ -176,12 +203,11 @@ export default function VideoPlayer({
     isPlaying,
   ]);
 
-  // EFFECT 2: Handle Play/Pause state changes
+  // EFFECT C: React to play/pause toggles (only when current clip’s src is set)
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || !isPlayerReady || !currentClip) return; // Need currentClip to be ready
+    if (!player || !isPlayerReady || !currentClip) return;
 
-    // Don't do anything if the source isn't loaded yet
     if (!player.currentSrc() || playerRef.current.clipId !== currentClip.id)
       return;
 
@@ -191,23 +217,16 @@ export default function VideoPlayer({
         if (playPromise !== undefined) {
           playPromise.catch((err) => {
             console.warn("Play blocked:", err);
-            // If blocked, sync state back to paused
-            if (err.name === "NotAllowedError") {
-              onPlayPause(); // Tell parent we couldn't play
+            if (err?.name === "NotAllowedError") {
+              onPlayPause(); // reflect blocked state
             }
           });
         }
       }
     } else {
-      if (!player.paused()) {
-        player.pause();
-      }
+      if (!player.paused()) player.pause();
     }
-  }, [
-    isPlaying,
-    isPlayerReady,
-    currentClip?.id, // Re-evaluate when clip changes
-  ]);
+  }, [isPlaying, isPlayerReady, currentClip?.id, onPlayPause]);
 
   // Manual play toggle
   const handleManualPlay = () => {
@@ -222,22 +241,13 @@ export default function VideoPlayer({
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
       if (playerRef.current) {
-        playerRef.current.dispose();
-        playerRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      clearTimeout(imageTimeoutRef.current);
-      clearInterval(imageIntervalRef.current);
-      if (playerRef.current) {
-        playerRef.current.dispose();
+        try {
+          playerRef.current.dispose();
+        } catch {}
         playerRef.current = null;
       }
     };
@@ -254,22 +264,24 @@ export default function VideoPlayer({
             transformOrigin: "center",
           }}
         >
-          {/* Always keep video element mounted for video.js stability */}
+          {/* Keep video element mounted for Video.js stability */}
           <video
             ref={videoRef}
             className="video-js vjs-default-skin w-full h-full object-contain absolute inset-0"
             playsInline
             preload="auto"
+            // crossOrigin is optional; keep if you capture frames/thumbnails
+            // crossOrigin="anonymous"
           />
 
-          {/* Show image overlay if current clip is an image */}
+          {/* Image overlay shown when current clip is an image */}
           {currentClip?.type === "image" && (
             <img
               src={currentClip.url}
               alt={currentClip.fileName || "image"}
               className="absolute inset-0 w-full h-full object-contain z-10 transition-opacity duration-500"
               style={{
-                opacity: isPlaying ? 1 : 0.8,
+                // opacity: isPlaying ? 1 : 0.8,
                 backgroundColor: "black",
               }}
             />
@@ -298,16 +310,6 @@ export default function VideoPlayer({
         <span className="text-black font-mono text-sm">
           {formatTime(duration)}
         </span>
-
-        {/* Audio status indicator */}
-        {/* {currentClip?.hasAudio && (
-          <div className="flex items-center gap-1 text-xs text-gray-500">
-            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.617.757L4.273 14H2a1 1 0 01-1-1V7a1 1 0 011-1h2.273l4.11-2.757a1 1 0 011.617.757zM12 7a1 1 0 011 1v4.586l2.293-2.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4A1 1 0 1110 10.586V8a1 1 0 011-1z" clipRule="evenodd" />
-            </svg>
-            Audio
-          </div>
-        )} */}
       </div>
     </div>
   );
