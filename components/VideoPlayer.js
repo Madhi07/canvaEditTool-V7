@@ -12,6 +12,7 @@ export default function VideoPlayer({
   onTimeUpdate,
   clips,
   duration,
+  onRequestSeek, // global timeline seek
   zoom = 1,
 }) {
   const videoRef = useRef(null);
@@ -25,15 +26,14 @@ export default function VideoPlayer({
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onClipEndRef = useRef(onClipEnd);
   const currentClipRef = useRef(currentClip);
+  const EPS_END = 0.05;
 
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
   }, [onTimeUpdate]);
-
   useEffect(() => {
     onClipEndRef.current = onClipEnd;
   }, [onClipEnd]);
-
   useEffect(() => {
     currentClipRef.current = currentClip;
   }, [currentClip]);
@@ -47,7 +47,7 @@ export default function VideoPlayer({
       autoplay: false,
       preload: "auto",
       fluid: true,
-      muted: false,
+      muted: false, // enforced below
       responsive: true,
     });
 
@@ -66,6 +66,7 @@ export default function VideoPlayer({
       if (onClipEndRef.current && currentClipRef.current) {
         onClipEndRef.current(currentClipRef.current.id);
       }
+      // do NOT auto-seek to 0 here; we only restart on user action
     });
 
     player.on("error", () => {
@@ -97,13 +98,12 @@ export default function VideoPlayer({
     return "";
   };
 
-  // EFFECT A: PRIME next video *inside the main player* while an image is active
+  // EFFECT A: prime next video while an image is active
   useEffect(() => {
     const player = playerRef.current;
     if (!player || !isPlayerReady || !currentClip) return;
     if (currentClip.type !== "image") return;
 
-    // Find the very next *video* visual clip after this image
     const nextVideo = (clips || [])
       .filter(
         (c) => c.type === "video" && c.startTime >= (currentClip.startTime ?? 0)
@@ -112,26 +112,26 @@ export default function VideoPlayer({
 
     if (!nextVideo || !nextVideo.url) return;
 
-    // If already primed with this url, skip
     const currentSourceUrl = getCurrentSourceUrl();
     if (currentSourceUrl === nextVideo.url) return;
 
-    // Prime: set the next video source now (under the image overlay), keep paused
     playerRef.current.clipId = nextVideo.id;
-    player.src({
-      src: nextVideo.url,
-      type: nextVideo.mimeType || "video/mp4",
-    });
+    player.src({ src: nextVideo.url, type: nextVideo.mimeType || "video/mp4" });
 
     const onReady = () => {
       player.off("loadedmetadata", onReady);
-      // keep paused; we’re only buffering
       if (!player.paused()) player.pause();
     };
 
     if (player.readyState() >= 1) onReady();
     else player.one("loadedmetadata", onReady);
-  }, [currentClip?.id, currentClip?.type, currentClip?.startTime, clips, isPlayerReady]);
+  }, [
+    currentClip?.id,
+    currentClip?.type,
+    currentClip?.startTime,
+    clips,
+    isPlayerReady,
+  ]);
 
   // EFFECT B: Load/Seek for the active clip (no reload when already primed)
   useEffect(() => {
@@ -139,7 +139,6 @@ export default function VideoPlayer({
     if (!player || !currentClip || !isPlayerReady) return;
 
     if (currentClip.type === "image") {
-      // Pause exactly once while an image is visible
       if (!player._imgPaused) {
         if (!player.paused()) player.pause();
         player._imgPaused = true;
@@ -147,15 +146,14 @@ export default function VideoPlayer({
       return;
     }
 
-    // back to video: lift the image pause marker
     player._imgPaused = false;
 
     const currentSourceUrl = getCurrentSourceUrl();
-    const urlChanged = !!currentClip.url && currentSourceUrl !== currentClip.url;
+    const urlChanged =
+      !!currentClip.url && currentSourceUrl !== currentClip.url;
     const seekTo = Math.max(0, currentClip.relativeTime || 0);
 
     if (urlChanged) {
-      // Only when jumping to a different video than what we primed
       playerRef.current.clipId = currentClip.id;
       player.src({
         src: currentClip.url,
@@ -164,6 +162,24 @@ export default function VideoPlayer({
 
       const onReady = () => {
         player.off("loadedmetadata", onReady);
+
+        // enforce mute after tech swap
+        const mediaEl =
+          playerRef.current?.tech_?.el() ||
+          playerRef.current?.el()?.querySelector("video");
+        if (mediaEl) {
+          mediaEl.muted = true;
+          mediaEl.defaultMuted = true;
+          mediaEl.volume = 0;
+          try {
+            if (mediaEl.audioTracks && mediaEl.audioTracks.length) {
+              for (let i = 0; i < mediaEl.audioTracks.length; i++) {
+                mediaEl.audioTracks[i].enabled = false;
+              }
+            }
+          } catch {}
+        }
+
         if (Math.abs((player.currentTime() ?? 0) - seekTo) > 0.02) {
           player.currentTime(seekTo);
         }
@@ -173,11 +189,9 @@ export default function VideoPlayer({
         }
       };
 
-      // loadedmetadata is enough; using it avoids waiting for full buffering
       if (player.readyState() >= 1) onReady();
       else player.one("loadedmetadata", onReady);
     } else {
-      // Same URL (likely primed): just drift-correct & play/pause
       const drift = Math.abs((player.currentTime() ?? 0) - seekTo);
       if (drift > 0.1) player.currentTime(seekTo);
 
@@ -217,9 +231,7 @@ export default function VideoPlayer({
         if (playPromise !== undefined) {
           playPromise.catch((err) => {
             console.warn("Play blocked:", err);
-            if (err?.name === "NotAllowedError") {
-              onPlayPause(); // reflect blocked state
-            }
+            if (err?.name === "NotAllowedError") onPlayPause();
           });
         }
       }
@@ -228,9 +240,62 @@ export default function VideoPlayer({
     }
   }, [isPlaying, isPlayerReady, currentClip?.id, onPlayPause]);
 
+  /** Enforce full mute on the real media element */
+  useEffect(() => {
+    if (!playerRef.current || !isPlayerReady) return;
+    let mediaEl = null;
+    try {
+      mediaEl =
+        playerRef.current.tech_?.el() ||
+        playerRef.current.el()?.querySelector("video");
+    } catch {}
+    if (!mediaEl) return;
+    mediaEl.muted = true;
+    mediaEl.defaultMuted = true;
+    mediaEl.volume = 0;
+    try {
+      if (mediaEl.audioTracks && mediaEl.audioTracks.length) {
+        for (let i = 0; i < mediaEl.audioTracks.length; i++) {
+          mediaEl.audioTracks[i].enabled = false;
+        }
+      }
+    } catch {}
+  }, [isPlayerReady]);
+
+  /** Pause when not on a video */
+  useEffect(() => {
+    if (!playerRef.current || !isPlayerReady) return;
+    const isVideo = currentClip?.type === "video";
+    const player = playerRef.current;
+    if (!isVideo) {
+      try {
+        if (!player.paused()) player.pause();
+      } catch {}
+    }
+  }, [currentClip?.type, isPlayerReady]);
+
   // Manual play toggle
   const handleManualPlay = () => {
-    if (!playerRef.current) return;
+    if (!playerRef.current) {
+      onPlayPause();
+      return;
+    }
+
+    const atEnd =
+      typeof duration === "number" &&
+      typeof currentTime === "number" &&
+      currentTime >= duration - EPS_END;
+
+    if (atEnd) {
+      // ask parent to move GLOBAL timeline to 0
+      if (onRequestSeek) onRequestSeek(0);
+
+      // also reset the HTML5 player if we're on a video
+      try {
+        if (currentClip?.type === "video") playerRef.current.currentTime(0);
+      } catch {}
+    }
+
     onPlayPause();
   };
 
@@ -253,16 +318,20 @@ export default function VideoPlayer({
     };
   }, []);
 
+  const displayTime =
+    typeof duration === "number" &&
+    typeof currentTime === "number" &&
+    currentTime >= duration - 0.05
+      ? duration // snap to full duration (0:11)
+      : currentTime;
+
   return (
     <div className="flex flex-col items-center w-full justify-center bg-white rounded-lg p-4 h-[60vh]">
       {/* Video Display */}
       <div className="relative w-full max-w-4xl h-[80%] rounded-lg overflow-hidden mb-2 flex items-center justify-center bg-black">
         <div
           className="w-full h-full flex items-center justify-center"
-          style={{
-            transform: `scale(${safeZoom})`,
-            transformOrigin: "center",
-          }}
+          style={{ transform: `scale(${safeZoom})`, transformOrigin: "center" }}
         >
           {/* Keep video element mounted for Video.js stability */}
           <video
@@ -270,8 +339,7 @@ export default function VideoPlayer({
             className="video-js vjs-default-skin w-full h-full object-contain absolute inset-0"
             playsInline
             preload="auto"
-            // crossOrigin is optional; keep if you capture frames/thumbnails
-            // crossOrigin="anonymous"
+            muted
           />
 
           {/* Image overlay shown when current clip is an image */}
@@ -280,10 +348,7 @@ export default function VideoPlayer({
               src={currentClip.url}
               alt={currentClip.fileName || "image"}
               className="absolute inset-0 w-full h-full object-contain z-10 transition-opacity duration-500"
-              style={{
-                // opacity: isPlaying ? 1 : 0.8,
-                backgroundColor: "black",
-              }}
+              style={{ backgroundColor: "black" }}
             />
           )}
         </div>
@@ -292,7 +357,7 @@ export default function VideoPlayer({
       {/* Controls */}
       <div className="flex items-center gap-4 w-full max-w-4xl justify-center">
         <span className="text-black font-mono text-sm">
-          {formatTime(currentTime || 0)}
+          {formatTime(displayTime || 0)}
         </span>
 
         <button

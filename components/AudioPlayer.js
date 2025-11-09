@@ -1,233 +1,238 @@
-// components/AudioPlayer.js
-import React, {
-  useEffect,
-  useRef,
-  forwardRef,
-  useImperativeHandle,
-} from "react";
+import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 
-const SYNC_TOLERANCE = 0.05;               // used for discrete seek corrections (not heavy-used now)
-const DRIFT_CORRECT_WHILE_PLAYING = 0.30;  // correct only if >= 300ms during continuous video playback
+/** Tunables */
+const FADE_SEC = 0.006; // 6ms clickless fade
 
-function computeVisibleLen(clip) {
-  const dur = Math.max(0, Number(clip.duration) || 0);
-  const ts = Math.max(0, Number(clip.trimStart) || 0);
-  const te = Math.max(0, Number(clip.trimEnd) || 0);
-  return Math.max(0, dur - ts - te);
+/** Single shared context + master */
+let AC = null;
+let MASTER = null;
+
+function getAC() {
+  if (!AC) {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    MASTER = AC.createGain();
+    MASTER.gain.setValueAtTime(1, AC.currentTime);
+    MASTER.connect(AC.destination);
+  }
+  return AC;
 }
 
-function isInsideWindow(clip, t) {
-  const visibleLen = computeVisibleLen(clip);
-  const end = clip.endTime ?? clip.startTime + visibleLen;
-  return t >= clip.startTime && t < end && visibleLen > 0;
+/** Buffer cache: url -> Promise<AudioBuffer> */
+const cache = new Map();
+function getBuffer(url) {
+  if (cache.has(url)) return cache.get(url);
+  const ac = getAC();
+  const p = fetch(url)
+    .then(r => r.arrayBuffer())
+    .then(ab => new Promise((res, rej) => ac.decodeAudioData(ab, res, rej)));
+  cache.set(url, p);
+  return p;
 }
 
-function desiredAssetOffset(clip, timelineTime) {
-  // offset inside the asset = trimStart + (timeline - clip.start)
-  const visibleLen = computeVisibleLen(clip);
-  const local = timelineTime - clip.startTime;
-  const target = (clip.trimStart || 0) + local;
-  // clamp to last frame inside trimmed region
-  return Math.max(
-    0,
-    Math.min(target, (clip.trimStart || 0) + visibleLen - 0.001)
-  );
+function visLen(c) {
+  const d = Math.max(0, Number(c.duration) || 0);
+  const ts = Math.max(0, Number(c.trimStart) || 0);
+  const te = Math.max(0, Number(c.trimEnd) || 0);
+  return Math.max(0, d - ts - te);
+}
+function clipEnd(c) {
+  return c.endTime ?? (c.startTime + visLen(c));
+}
+function inWindow(c, t) {
+  const len = visLen(c);
+  return len > 0 && t >= c.startTime && t < clipEnd(c);
+}
+function bufferOffsetFor(c, timelineT) {
+  const off = (c.trimStart || 0) + (timelineT - c.startTime);
+  const max = (c.trimStart || 0) + visLen(c) - 0.001;
+  return Math.max(0, Math.min(off, max));
 }
 
-const AudioPlayer = forwardRef(function AudioPlayer(
-  {
-    clips,                 // full list of clips
-    currentTime,           // global timeline time (sec)
-    isPlaying,             // transport play/pause
-    seekAudio,             // bump when user performs a discrete seek/jump
-    masterVolume = 1,      // optional
-    activeVisualType,      // 'image' | 'video' | undefined
-  },
-  ref
-) {
-  const audioMapRef = useRef(new Map());        // id -> { audio }
-  const lastSeekAudioRef = useRef(seekAudio);
-  const prevInsideMapRef = useRef(new Map());   // clipId -> wasInside(Boolean)
-  const lastBigCorrectionAtRef = useRef(0);
-  const prevVisualTypeRef = useRef(activeVisualType); // track image -> video crossings
+/** Active sources: id -> { source, gain, startedAtCtx, endsAtTimeline, clipSnapshot } */
+const active = new Map();
 
-  // Expose imperative controls
-  useImperativeHandle(
-    ref,
-    () => ({
-      stopAll() {
-        const map = audioMapRef.current;
-        for (const { audio } of map.values()) {
-          try {
-            audio.pause();
-          } catch {}
-        }
-      },
-      setMasterVolume(v) {
-        const vol = Math.max(0, Math.min(1, v));
-        const map = audioMapRef.current;
-        for (const { audio } of map.values()) {
-          audio.volume = vol * (audio.__clipGain ?? 1);
-        }
-      },
-    }),
-    []
-  );
+function fade(gainNode, tStart, from, to, dur) {
+  const g = gainNode.gain;
+  g.cancelScheduledValues(tStart);
+  g.setValueAtTime(from, tStart);
+  g.linearRampToValueAtTime(to, tStart + Math.max(0.001, dur));
+}
 
-  // Ensure audio elements exist for every audio clip and keep them updated
-  useEffect(() => {
-    if (!clips?.length) return;
-    const map = audioMapRef.current;
+function startClip(ac, clip, timelineNow, masterVol) {
+  // Avoid double-start
+  if (active.has(clip.id)) return;
 
-    for (const clip of clips) {
-      if (clip.type !== "audio") continue;
+  const startTL = Math.max(timelineNow, clip.startTime);
+  const endTL = clipEnd(clip);
+  if (endTL <= startTL) return;
 
-      const clipGain = clip.gain != null ? clip.gain : 1;
+  return getBuffer(clip.url).then(buffer => {
+    if (!buffer) return;
 
-      if (!map.has(clip.id)) {
-        const el = new Audio();
-        el.preload = "auto";
-        el.crossOrigin = "anonymous";
-        el.src = clip.url;
-        el.__clipGain = clipGain;
-        el.volume = clipGain * masterVolume;
-        map.set(clip.id, { audio: el });
+    // Compute offsets and durations
+    const when = ac.currentTime + (startTL - timelineNow); // schedule relative to now
+    const offset = bufferOffsetFor(clip, startTL);
+    const maxPlayable = Math.max(0, buffer.duration - offset);
+    const dur = Math.min(endTL - startTL, maxPlayable);
+    if (dur <= 0) return;
+
+    // Nodes
+    const src = ac.createBufferSource();
+    src.buffer = buffer;
+    const g = ac.createGain();
+
+    const perClip = clip.gain != null ? clip.gain : 1;
+    const targetGain = Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
+
+    // start near silent, fade in
+    g.gain.setValueAtTime(0.0001, when);
+    fade(g, when, 0.0001, targetGain, FADE_SEC);
+
+    src.connect(g).connect(MASTER);
+
+    try {
+      src.start(when, offset, dur);
+    } catch {
+      return; // scheduling in the past, skip
+    }
+
+    // Fade out at the real end only
+    const outStart = when + dur - FADE_SEC;
+    if (outStart > ac.currentTime) {
+      fade(g, outStart, targetGain, 0.0001, FADE_SEC);
+    }
+
+    // Auto cleanup
+    const endsAtCtx = when + dur;
+    const teardown = () => {
+      const entry = active.get(clip.id);
+      if (!entry) return;
+      if (AC.currentTime >= endsAtCtx - 0.01) {
+        active.delete(clip.id);
       } else {
-        const entry = map.get(clip.id);
-        const el = entry.audio;
-        el.__clipGain = clipGain;
-        el.volume = clipGain * masterVolume;
-        if (el.src !== clip.url) {
-          try {
-            el.pause();
-          } catch {}
-          el.src = clip.url;
-        }
+        setTimeout(teardown, 50);
       }
-    }
-
-    // Remove elements for deleted audio clips
-    for (const [id, entry] of map.entries()) {
-      const stillExists = clips.some((c) => c.type === "audio" && c.id === id);
-      if (!stillExists) {
-        try {
-          entry.audio.pause();
-        } catch {}
-        entry.audio.src = "";
-        map.delete(id);
-        prevInsideMapRef.current.delete(id);
-      }
-    }
-  }, [clips, masterVolume]);
-
-  // Core sync: on play/pause/seek/time change, align every audio element
-  useEffect(() => {
-    const map = audioMapRef.current;
-    if (!clips) return;
-
-    const isDiscreteSeek = lastSeekAudioRef.current !== seekAudio;
-    if (isDiscreteSeek) lastSeekAudioRef.current = seekAudio;
-
-    // During image playback, avoid continuous drift corrections (step-wise timer drives timeline)
-    const allowContinuousCorrection = isPlaying && activeVisualType !== "image";
-
-    // Detect image -> video transition this tick
-    const enteringVideoFromImage =
-      prevVisualTypeRef.current === "image" && activeVisualType === "video";
-
-    const audioClips = clips.filter((c) => c.type === "audio");
-
-    for (const clip of audioClips) {
-      const entry = map.get(clip.id);
-      if (!entry) continue;
-      const el = entry.audio;
-
-      const inside = isInsideWindow(clip, currentTime);
-      const wasInside = prevInsideMapRef.current.get(clip.id) === true;
-
-      if (!inside) {
-        if (!el.paused) el.pause();
-        prevInsideMapRef.current.set(clip.id, false);
-        continue;
-      }
-
-      // Compute desired offset for this time
-      const target = desiredAssetOffset(clip, currentTime);
-      const drift = Math.abs((el.currentTime || 0) - target);
-
-      const doSeekAndMaybePlay = () => {
-        const now = performance.now();
-        const entering = !wasInside && inside; // just entered this audio window
-        const bigDrift =
-          allowContinuousCorrection &&
-          drift >= DRIFT_CORRECT_WHILE_PLAYING &&
-          now - lastBigCorrectionAtRef.current > 200;
-
-        // Hard-align when it matters to avoid crackle:
-        //  - explicit user seek (seekAudio bump)
-        //  - entering the clip window
-        //  - large drift during continuous playback (when visual is NOT an image)
-        //  - image → video switch (keeps audio in lockstep with freshly resumed video)
-        if (isDiscreteSeek || entering || bigDrift || enteringVideoFromImage) {
-          const safeTarget = Math.max(
-            0,
-            Math.min(target, Math.max(0, (el.duration || target) - 0.001))
-          );
-          el.currentTime = safeTarget;
-          if (bigDrift) lastBigCorrectionAtRef.current = now;
-        }
-
-        if (isPlaying) {
-          if (el.paused) {
-            el.play().catch(() => {});
-          }
-        } else {
-          if (!el.paused) el.pause();
-        }
-      };
-
-      if (el.readyState >= 1 && Number.isFinite(el.duration || 0)) {
-        doSeekAndMaybePlay();
-      } else {
-        const onLoaded = () => {
-          el.removeEventListener("loadedmetadata", onLoaded);
-          doSeekAndMaybePlay();
-        };
-        el.addEventListener("loadedmetadata", onLoaded, { once: true });
-      }
-
-      prevInsideMapRef.current.set(clip.id, true);
-    }
-
-    // Safety: pause any non-window clip that might still be playing
-    for (const [id, entry] of map.entries()) {
-      const clip = audioClips.find((c) => c.id === id);
-      if (!clip) continue;
-      if (!isInsideWindow(clip, currentTime) && !entry.audio.paused) {
-        entry.audio.pause();
-      }
-    }
-
-    // remember current visual type for next tick (for image → video detection)
-    prevVisualTypeRef.current = activeVisualType;
-  }, [clips, currentTime, isPlaying, seekAudio, activeVisualType]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      const map = audioMapRef.current;
-      for (const { audio } of map.values()) {
-        try {
-          audio.pause();
-        } catch {}
-        audio.src = "";
-      }
-      map.clear();
-      prevInsideMapRef.current.clear();
     };
-  }, []);
+    setTimeout(teardown, (dur + 0.1) * 1000);
 
-  return null; // headless controller (no UI)
+    // Track it
+    active.set(clip.id, {
+      source: src,
+      gain: g,
+      startedAtCtx: when,
+      endsAtTimeline: startTL + dur,
+      clipSnapshot: { startTime: clip.startTime, endTime: clip.endTime, trimStart: clip.trimStart, trimEnd: clip.trimEnd, url: clip.url, gain: clip.gain },
+    });
+  });
+}
+
+function stopClip(id, fast = false) {
+  const e = active.get(id);
+  if (!e) return;
+  try {
+    if (fast) {
+      e.source.stop();
+    } else {
+      // short fade out, then stop
+      const now = AC.currentTime;
+      const cur = e.gain.gain.value;
+      fade(e.gain, now, cur, 0.0001, FADE_SEC);
+      setTimeout(() => { try { e.source.stop(); } catch {} }, FADE_SEC * 1000 + 5);
+    }
+  } catch {}
+  active.delete(id);
+}
+
+function stopAll() {
+  for (const id of Array.from(active.keys())) stopClip(id, true);
+}
+
+const AudioPlayer = forwardRef(function AudioPlayer({
+  activeAudioClips, // array of audio clips overlapping the current time
+  isPlaying,
+  currentTime,
+  seekAudio,        // bump on discrete seeks
+  clips,            // (unused here, but fine to keep)
+  activeVisualType, // (unused here)
+  masterVolume = 1,
+}, ref) {
+  const lastSeekRef = useRef(seekAudio);
+  const masterVolRef = useRef(masterVolume);
+
+  useImperativeHandle(ref, () => ({
+    stopAll() { stopAll(); },
+    setMasterVolume(v) {
+      masterVolRef.current = Math.max(0, Math.min(1, v));
+      const ac = getAC();
+      MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+    },
+  }), []);
+
+  // keep master volume node in sync
+  useEffect(() => {
+    masterVolRef.current = Math.max(0, Math.min(1, masterVolume));
+    const ac = getAC();
+    MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+  }, [masterVolume]);
+
+  // play/pause gate
+  useEffect(() => {
+    const ac = getAC();
+    if (isPlaying) ac.resume?.();
+    else stopAll();
+  }, [isPlaying]);
+
+  // discrete seek: hard stop & let next effect restart what’s needed
+  useEffect(() => {
+    if (seekAudio !== lastSeekRef.current) {
+      lastSeekRef.current = seekAudio;
+      stopAll();
+    }
+  }, [seekAudio]);
+
+  // main scheduling: maintain exactly one continuous source per active clip
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const ac = getAC();
+
+    // 1) Start any active clip that isn't already running
+    const wantedIds = new Set();
+    for (const clip of activeAudioClips) {
+      wantedIds.add(clip.id);
+
+      const e = active.get(clip.id);
+
+      // If already playing but its timing definition changed (drag/trim/url), restart it
+      if (e) {
+        const snap = e.clipSnapshot;
+        if (
+          snap.startTime !== clip.startTime ||
+          snap.endTime !== clip.endTime ||
+          snap.trimStart !== clip.trimStart ||
+          snap.trimEnd !== clip.trimEnd ||
+          snap.url !== clip.url ||
+          snap.gain !== clip.gain
+        ) {
+          stopClip(clip.id, true);
+        }
+      }
+
+      if (!active.has(clip.id)) {
+        startClip(ac, clip, currentTime, masterVolRef.current);
+      }
+    }
+
+    // 2) Stop anything no longer active (clip left the window)
+    for (const id of Array.from(active.keys())) {
+      if (!wantedIds.has(id)) stopClip(id, false);
+    }
+  }, [isPlaying, currentTime, activeAudioClips]);
+
+  // cleanup on unmount
+  useEffect(() => () => stopAll(), []);
+
+  return null;
 });
 
 export default AudioPlayer;

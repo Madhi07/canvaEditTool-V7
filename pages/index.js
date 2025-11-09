@@ -35,12 +35,19 @@ export default function Home() {
   const [totalDuration, setTotalDuration] = useState(10);
   const [videoZoom, setVideoZoom] = useState(1);
   const [seekAudio, setSeekAudio] = useState(0);
-  const EPS = 0.001;
+  const EPS = 0.002;
+  const MAX_DT = 0.05;
   const justSeekedIntoImageRef = useRef(false);
   const clipsRef = useRef(clips);
   useEffect(() => {
     clipsRef.current = clips;
   }, [clips]);
+  const lastVisualIdRef = useRef(null);
+  const enteredImageRef = useRef(false);
+  const totalDurationRef = useRef(totalDuration);
+  useEffect(() => {
+    totalDurationRef.current = totalDuration;
+  }, [totalDuration]);
 
   // If you want to call methods on AudioPlayer you can add a ref and wire methods there
   const audioPlayerRef = useRef(null);
@@ -294,22 +301,19 @@ export default function Home() {
   const handleClipUpdate = (clipId, updates) => {
     setClips((prev) => {
       const target = prev.find((c) => c.id === clipId);
-      if (!target) return prev;
-
-      // Apply the field updates
       const updated = prev.map((c) =>
         c.id === clipId ? { ...c, ...updates } : c
       );
 
-    
       const affectsTimeline =
         updates.startTime !== undefined ||
         updates.trimStart !== undefined ||
         updates.trimEnd !== undefined;
 
-      const shouldReflow = target.type === "video" && affectsTimeline;
+      const isVisual =
+        target && (target.type === "video" || target.type === "image");
 
-      return shouldReflow ? autoReflowClips(updated) : updated;
+      return affectsTimeline && isVisual ? autoReflowClips(updated) : updated;
     });
   };
 
@@ -511,66 +515,92 @@ export default function Home() {
     return [...adjusted, ...nonVisuals];
   };
 
-  // Image clip playback: drive timeline with rAF (stable, no skips)
+  // 🔁 Image clip playback: rAF drives ONLY while on an image
   useEffect(() => {
     if (!isPlaying) return;
 
     let rafId;
-    let last = performance.now();
+    let lastNow = performance.now();
+    let running = true;
+
+    const visualsSorted = () =>
+      clipsRef.current
+        .filter((c) => c.type === "video" || c.type === "image")
+        .sort((a, b) => a.startTime - b.startTime);
+
+    const findActiveAt = (t, visuals) =>
+      visuals.find((c) => t >= c.startTime - EPS && t < c.endTime - EPS);
 
     const tick = (now) => {
-      let dt = (now - last) / 1000;
+      if (!running) return;
 
-      // If we just sought into an image, zero out the first dt so we don't leap over it.
-      if (justSeekedIntoImageRef.current) {
-        justSeekedIntoImageRef.current = false;
-        last = now;
-        dt = 0;
-      } else {
-        // Cap dt to avoid big jumps after tab throttling (~60ms cap)
-        if (dt > 0.06) dt = 0.06;
-        last = now;
-      }
+      // compute dt and clamp
+      let dt = (now - lastNow) / 1000;
+      if (dt > MAX_DT) dt = MAX_DT;
+      lastNow = now;
 
       setCurrentTime((prev) => {
-        const freshClips = clipsRef.current;
+        const visuals = visualsSorted();
+        if (!visuals.length) return prev;
 
-        const active = freshClips.find(
-          (c) => prev >= c.startTime - EPS && prev < c.endTime - EPS
-        );
-        if (!active || active.type !== "image") return prev;
+        const active = findActiveAt(prev, visuals);
 
-        const next = prev + dt;
-
-        if (next >= active.endTime - EPS) {
-          const nextClip = freshClips
-            .filter((c) => c.type === "video" || c.type === "image")
-            .sort((a, b) => a.startTime - b.startTime)
-            .find((c) => c.startTime >= active.endTime - EPS);
-
-          if (nextClip) {
-            const startInside =
-              nextClip.type === "image"
-                ? nextClip.startTime + EPS
-                : nextClip.startTime;
-            // keep transport going if we were already playing
-            setTimeout(() => setIsPlaying(true), 50);
-            return startInside;
-          } else {
-            setIsPlaying(false);
-            return active.endTime - EPS;
-          }
+        // If no active visual, we probably finished. Snap to true end & stop.
+        if (!active) {
+          running = false;
+          setIsPlaying(false);
+          const end = Math.max(...visuals.map((c) => c.endTime));
+          return end; // snap to true end (fixes 0:10/0:11 display too)
         }
 
-        return next;
+        // Only advance time here if the active visual is an IMAGE.
+        if (active.type !== "image") {
+          // reset image-entry markers so next image starts inside
+          enteredImageRef.current = false;
+          lastVisualIdRef.current = active.id;
+          return prev; // let <video> drive time via onTimeUpdate
+        }
+
+        // First frame after entering this image: nudge just inside its window
+        const firstTimeOnThisImage =
+          lastVisualIdRef.current !== active.id || !enteredImageRef.current;
+        if (firstTimeOnThisImage) {
+          enteredImageRef.current = true;
+          lastVisualIdRef.current = active.id;
+          // If we're at/before start, push slightly inside to avoid "stuck at start"
+          return Math.max(prev, active.startTime + EPS);
+        }
+
+        // Regular advance inside the image
+        const nextT = prev + dt;
+        const imgEnd = active.endTime - EPS;
+
+        if (nextT < imgEnd) return nextT;
+
+        // Hand off to the next visual (exact start for videos, +EPS for images)
+        const idx = visuals.findIndex((c) => c.id === active.id);
+        if (idx >= 0 && idx < visuals.length - 1) {
+          const nxt = visuals[idx + 1];
+          enteredImageRef.current = false;
+          lastVisualIdRef.current = nxt.id;
+          return nxt.type === "image" ? nxt.startTime + EPS : nxt.startTime;
+        }
+
+        // No more visuals: stop at the true end
+        running = false;
+        setIsPlaying(false);
+        return active.endTime; // true end, not end - EPS
       });
 
       rafId = requestAnimationFrame(tick);
     };
 
     rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, EPS, clipsRef]);
+    return () => {
+      running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [isPlaying /* keep deps minimal so the loop stays stable */]);
 
   // This preserves your "echo" behavior: multiple audio clips overlapping will all be active.
   const activeAudioClips = useMemo(() => {
@@ -606,6 +636,7 @@ export default function Home() {
             onTimeUpdate={handleTimeUpdate}
             duration={totalDuration}
             zoom={videoZoom}
+            onRequestSeek={handleSeek}
           />
         </div>
 
