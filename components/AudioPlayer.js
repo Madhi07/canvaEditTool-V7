@@ -20,20 +20,45 @@ function getAC() {
 
 /** Buffer cache: url -> Promise<AudioBuffer> */
 const cache = new Map();
-function getBuffer(url) {
+async function getBuffer(url) {
+  // If already cached, return it
   if (cache.has(url)) return cache.get(url);
+
   const ac = getAC();
-  const p = fetch(url)
-    .then((r) => r.arrayBuffer())
-    .then(
-      (ab) =>
-        new Promise((res, rej) => {
-          ac.decodeAudioData(ab, res, rej);
-        })
-    );
-  cache.set(url, p);
-  return p;
+
+  // Fetch audio data via your Next.js API
+  const response = await fetch(`/api/audio?url=${encodeURIComponent(url)}`);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch audio: ${response.status}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+
+  // Decode the audio data using AudioContext
+  const decoded = await new Promise((resolve, reject) => {
+    ac.decodeAudioData(arrayBuffer, resolve, reject);
+  });
+
+  cache.set(url, decoded); // cache it
+  return decoded;
 }
+//  function getBuffer(url) {
+//   if (cache.has(url)) return cache.get(url);
+//   const ac = getAC();
+//   fetch(`/api/audio?url=${encodeURIComponent(url)}`)
+//     // const p = fetch(url)
+//     const arrayBuffer = await response.arrayBuffer();
+//     .then((r) => r.arrayBuffer())
+//     .then(
+//       (ab) =>
+//         new Promise((res, rej) => {
+//           ac.decodeAudioData(ab, res, rej);
+//         })
+//     );
+//   cache.set(url, p);
+//   return p;
+// }
 
 function visLen(c) {
   const d = Math.max(0, Number(c.duration) || 0);
@@ -116,7 +141,15 @@ function stopAll() {
 }
 
 /** Create and schedule a single continuous BufferSource for a clip */
-function startClip(ac, clip, timelineNow, masterVol, sessionAtStart, isPlayingRef, sessionRef) {
+function startClip(
+  ac,
+  clip,
+  timelineNow,
+  masterVol,
+  sessionAtStart,
+  isPlayingRef,
+  sessionRef
+) {
   if (active.has(clip.id)) return;
 
   const startTL = Math.max(timelineNow, clip.startTime);
@@ -126,7 +159,12 @@ function startClip(ac, clip, timelineNow, masterVol, sessionAtStart, isPlayingRe
   return getBuffer(clip.url)
     .then((buffer) => {
       // Guard: if session changed or we are no longer playing, bail out
-      if (!buffer || !isPlayingRef.current || sessionRef.current !== sessionAtStart) return;
+      if (
+        !buffer ||
+        !isPlayingRef.current ||
+        sessionRef.current !== sessionAtStart
+      )
+        return;
 
       const when = ac.currentTime + (startTL - timelineNow);
       const offset = bufferOffsetFor(clip, startTL);
@@ -349,9 +387,20 @@ const AudioPlayer = forwardRef(function AudioPlayer(
 
       if (!active.has(clip.id)) {
         // extra guard: only schedule if actually overlapping now
-        if (inWindow(clip, currentTime) || inWindow(clip, currentTime + 0.001)) {
+        if (
+          inWindow(clip, currentTime) ||
+          inWindow(clip, currentTime + 0.001)
+        ) {
           // pass sessionAtTick / refs down to startClip for safety
-          startClip(ac, clip, currentTime, masterVolRef.current, sessionAtTick, isPlayingRef, sessionRef);
+          startClip(
+            ac,
+            clip,
+            currentTime,
+            masterVolRef.current,
+            sessionAtTick,
+            isPlayingRef,
+            sessionRef
+          );
         }
       }
     }

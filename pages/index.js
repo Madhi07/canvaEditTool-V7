@@ -10,6 +10,20 @@ import {
 } from "../utils/thumbnailExtractor";
 import AudioPlayer from "../components/AudioPlayer";
 
+import ClipsData from "../constant/data";
+
+async function fetchExternalClips() {
+  try {
+    const resp = await fetch("/api/clips");
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return data?.clips || [];
+  } catch (err) {
+    console.debug("failed to load external clips:", err);
+    return [];
+  }
+}
+
 export default function Home() {
   const [clips, setClips] = useState([
     {
@@ -58,7 +72,39 @@ export default function Home() {
     audioPlayerRef.current?.stopAll?.();
   }, []);
 
+  // ---------- DEFAULT CLIP METADATA LOADER
+  // Skip loading/updating default clip if external visuals exist.
   useEffect(() => {
+    // Determine if external visuals exist from ClipsData or marked clips
+    const externalHasVisuals = (() => {
+      try {
+        if (ClipsData) {
+          const dataEntry =
+            Array.isArray(ClipsData) && ClipsData.length
+              ? ClipsData.find((d) => Array.isArray(d.slides)) || ClipsData[0]
+              : ClipsData;
+          const slides = Array.isArray(dataEntry?.slides)
+            ? dataEntry.slides
+            : Array.isArray(ClipsData) && ClipsData.every((s) => s && (s.image || s.image_url || s.url))
+            ? ClipsData
+            : null;
+          if (slides && slides.length) return true;
+        }
+      } catch (e) {
+        // ignore
+      }
+      // runtime flag: if clips already contain non-default visual items that came from remote
+      const existingVisualsFromExternal = clips.some(
+        (c) => (c.type === "image" || c.type === "video") && c.externalSource
+      );
+      return !!existingVisualsFromExternal;
+    })();
+
+    if (externalHasVisuals) {
+      // skip default video load since external visuals exist
+      return;
+    }
+
     const defaultClip = clips.find((c) => c.id === "default-clip");
     if (!defaultClip) return;
 
@@ -101,7 +147,7 @@ export default function Home() {
     };
 
     loadDefaultMetadata();
-  }, []);
+  }, []); // run once on mount
 
   useEffect(() => {
     if (!clips.length) return;
@@ -613,6 +659,173 @@ export default function Home() {
       )
       .sort((a, b) => (a.track ?? 0) - (b.track ?? 0));
   }, [clips, currentTime, totalDuration]);
+
+  // -----------------------
+  // ADAPTER: map ClipsData -> app clips and REPLACE existing clips
+  // - converts slides to image + audio clips
+  // - attempts to read remote audio durations (but will fall back to slide duration)
+  // - REPLACES current clips so default-clip does not show when external data exists
+  // -----------------------
+
+  const getRemoteAudioDuration = (url, fallback = null) =>
+    new Promise((resolve) => {
+      if (!url) return resolve(fallback);
+      try {
+        const a = new Audio();
+        a.src = url;
+        a.preload = "metadata";
+
+        const onMeta = () => {
+          const d = isFinite(a.duration) && a.duration > 0 ? a.duration : fallback;
+          cleanup();
+          resolve(d);
+        };
+        const onErr = () => {
+          cleanup();
+          resolve(fallback);
+        };
+        const cleanup = () => {
+          a.removeEventListener("loadedmetadata", onMeta);
+          a.removeEventListener("error", onErr);
+          try {
+            a.src = "";
+          } catch (e) {}
+        };
+
+        a.addEventListener("loadedmetadata", onMeta);
+        a.addEventListener("error", onErr);
+
+        // safety timeout
+        setTimeout(() => {
+          cleanup();
+          resolve(fallback);
+        }, 3000);
+      } catch (err) {
+        resolve(fallback);
+      }
+    });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const buildAndReplaceClipsFromClipsData = async () => {
+      if (!ClipsData) return;
+
+      // Determine slides array: support multiple shapes (array of entries with slides, or top-level slides)
+      const dataEntry =
+        Array.isArray(ClipsData) && ClipsData.length
+          ? ClipsData.find((d) => Array.isArray(d.slides)) || ClipsData[0]
+          : ClipsData;
+      if (!dataEntry) return;
+
+      const slides = Array.isArray(dataEntry.slides)
+        ? dataEntry.slides
+        : Array.isArray(ClipsData) && ClipsData.every((s) => s && (s.image || s.image_url || s.url))
+        ? ClipsData
+        : null;
+      if (!slides || !slides.length) return;
+
+      // Fetch audio durations in parallel (with fallback)
+      const audioDurationPromises = slides.map((s) =>
+        s?.audio?.audio_url
+          ? getRemoteAudioDuration(s.audio.audio_url, Number(s?.image?.duration) || 3)
+          : Promise.resolve(null)
+      );
+
+      const audioDurations = await Promise.all(audioDurationPromises);
+
+      // Build newClips, laid out sequentially from start=0
+      const newClips = [];
+      let visualCursor = 0;
+
+      for (let i = 0; i < slides.length; i++) {
+        const slide = slides[i];
+        const imageObj = slide.image || {};
+        const audioObj = slide.audio || {};
+
+        // support alternate shapes: slide.image_url or slide.imageUrl
+        const imageUrl = imageObj.image_url || slide.image_url || slide.imageUrl || null;
+        const visualDuration = Number(imageObj.duration || slide.duration) || 3;
+        const visualId =
+          slide.uuid || `visual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const visualStart = visualCursor;
+        const visualEnd = visualStart + visualDuration;
+
+        const visualClip = {
+          id: visualId,
+          type: "image",
+          url: imageUrl || "",
+          fileName: imageUrl ? imageUrl.split("/").pop() : `image-${visualId}`,
+          mimeType: imageUrl?.endsWith(".png") ? "image/png" : "image/jpeg",
+          duration: visualDuration,
+          startTime: visualStart,
+          endTime: visualEnd,
+          trimStart: 0,
+          trimEnd: 0,
+          hasAudio: !!(audioObj && audioObj.audio_url),
+          thumbnail: imageUrl || null,
+          track: 0,
+        };
+        newClips.push(visualClip);
+
+        if (audioObj && audioObj.audio_url) {
+          const audioDur = audioDurations[i] || visualDuration;
+          const audioClip = {
+            id: `${audioObj.uuid || visualId}-audio`,
+            type: "audio",
+            url: audioObj.audio_url,
+            fileName: audioObj.audio_url.split("/").pop(),
+            mimeType: "audio/mpeg",
+            duration: audioDur,
+            startTime: visualStart,
+            endTime: visualStart + audioDur,
+            trimStart: 0,
+            trimEnd: 0,
+            hasAudio: true,
+            thumbnail: null,
+            track: 0, // will be fixed by fixAudioTrackLayers
+          };
+          newClips.push(audioClip);
+        }
+
+        visualCursor = visualEnd;
+      }
+
+      if (cancelled) return;
+      if (!newClips.length) return;
+
+      // REPLACE existing clips entirely with generated clips (no default-clip)
+      setClips(() => {
+        const marked = newClips.map((c) => ({ ...c, externalSource: true }));
+        return fixAudioTrackLayers(marked);
+      });
+
+      // ensure selection and total duration update
+      setTimeout(() => {
+        const allClipsNow = clipsRef.current;
+        const firstVisual = allClipsNow.find((c) => c.type === "image" || c.type === "video");
+        if (firstVisual) {
+          setSelectedClipId((prev) => prev || firstVisual.id);
+          const maxVisualEnd = Math.max(
+            ...allClipsNow.filter((c) => c.type === "video" || c.type === "image").map((c) => c.endTime)
+          );
+          setTotalDuration((prev) => Math.max(prev, maxVisualEnd || 0));
+        }
+      }, 50);
+    };
+
+    // Run the builder once on mount
+    buildAndReplaceClipsFromClipsData();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once
+
+  // -----------------------
+  // end adapter
+  // -----------------------
 
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">

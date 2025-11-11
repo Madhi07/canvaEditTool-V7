@@ -22,6 +22,54 @@ function getAudioContext() {
 // Cache decoded buffers by URL
 const bufferCache = new Map();
 
+/* -------------------------
+   Helpers: fallbacks for fetch
+   ------------------------- */
+function toS3ProxyPath(url) {
+  try {
+    const u = new URL(url);
+    return `/s3${u.pathname}${u.search || ""}`;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchAudioArrayBufferWithFallback(audioUrl) {
+  // 1) try direct fetch first (fast if CORS enabled)
+  try {
+    const resp = await fetch(audioUrl, { mode: "cors" });
+    if (resp.ok) return await resp.arrayBuffer();
+    // fallthrough if 4xx/5xx
+  } catch (err) {
+    console.debug("[Audio fetch] Direct fetch failed (likely CORS):", err);
+  }
+
+  // 2) try same-origin rewrite path (requires next.config.js rewrite)
+  const s3Path = toS3ProxyPath(audioUrl);
+  if (s3Path) {
+    try {
+      const resp = await fetch(s3Path);
+      if (resp.ok) return await resp.arrayBuffer();
+    } catch (err) {
+      console.debug("[Audio fetch] /s3 proxy failed:", err);
+    }
+  }
+
+  // 3) try API proxy route that fetches server-side
+  try {
+    const proxyUrl = `/api/proxy-audio?url=${encodeURIComponent(audioUrl)}`;
+    const resp = await fetch(proxyUrl);
+    if (resp.ok) return await resp.arrayBuffer();
+    throw new Error(`Proxy fetch failed ${resp.status}`);
+  } catch (err) {
+    console.error("[Audio fetch] All fetch attempts failed:", err);
+    throw err;
+  }
+}
+
+/* -------------------------
+   Component
+   ------------------------- */
 export default function AudioClipWaveform({
   audioUrl,
   duration,
@@ -56,16 +104,44 @@ export default function AudioClipWaveform({
           const audioCtx = await getAudioContext();
           audioCtxRef.current = audioCtx;
 
-          if (audioCtx.state === "suspended") {
-            await audioCtx.resume();
+          // if context is suspended, attempt to resume - may throw in some browsers if no user gesture
+          try {
+            if (audioCtx.state === "suspended") {
+              await audioCtx.resume();
+            }
+          } catch (resumeErr) {
+            // not fatal for waveform: continue and let fetch/decode handle gracefully
+            console.debug("AudioContext resume attempt:", resumeErr);
           }
 
-          const response = await fetch(audioUrl);
-          if (!response.ok) throw new Error(`Failed to fetch audio: ${response.status}`);
+          // Use robust fetch with fallback to avoid CORS crashes
+          let buf;
+          try {
+            buf = await fetchAudioArrayBufferWithFallback(audioUrl);
+          } catch (fetchErr) {
+            throw new Error(`Failed to fetch audio (all fallbacks): ${fetchErr.message || fetchErr}`);
+          }
 
-          const buf = await response.arrayBuffer();
-          const decoded = await audioCtx.decodeAudioData(buf);
-          const data = decoded.getChannelData(0);
+          // decode
+          let decoded;
+          try {
+            decoded = await audioCtx.decodeAudioData(buf.slice(0));
+          } catch (decodeErr) {
+            // Some browsers may require decodeAudioData callback form; try fallback
+            decoded = await new Promise((resolve, reject) => {
+              try {
+                audioCtx.decodeAudioData(
+                  buf.slice(0),
+                  (res) => resolve(res),
+                  (err) => reject(err)
+                );
+              } catch (e) {
+                reject(e);
+              }
+            });
+          }
+
+          const data = decoded.numberOfChannels > 0 ? decoded.getChannelData(0) : new Float32Array(0);
           const sampleRate = decoded.sampleRate;
           const durationSec = decoded.length / sampleRate;
 
@@ -151,7 +227,7 @@ export default function AudioClipWaveform({
         }
       } catch (err) {
         console.error("Waveform rendering error:", err);
-        setError(err.message);
+        setError(err.message || String(err));
 
         // Draw error state
         ctx.clearRect(0, 0, width, height);
@@ -167,6 +243,7 @@ export default function AudioClipWaveform({
     }
 
     renderWave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioUrl, width, height, color, progress, isSelected, trimStart, trimEnd, duration]);
 
   // Cleanup on unmount
