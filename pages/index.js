@@ -49,6 +49,9 @@ export default function Home() {
     totalDurationRef.current = totalDuration;
   }, [totalDuration]);
 
+  // ---- new: track last manual selection so auto-select won't instantly override
+  const lastManualSelectRef = useRef(0);
+
   const audioPlayerRef = useRef(null);
 
   const stopAllAudio = useCallback(() => {
@@ -310,6 +313,8 @@ export default function Home() {
     setIsPlaying(false);
     stopAllAudio();
     setSeekAudio((t) => t + 1);
+    // record manual selection time so auto-select won't override immediately
+    lastManualSelectRef.current = performance.now();
   };
   const activeVisualType = (() => {
     const visual = clips
@@ -575,6 +580,28 @@ export default function Home() {
       if (rafId) cancelAnimationFrame(rafId);
     };
   }, [isPlaying]);
+
+  // --- NEW: auto-select active visual clip but respect recent manual clicks
+  useEffect(() => {
+    const MANUAL_GRACE_MS = 400;
+
+    const visualClips = clips
+      .filter((c) => c.type === "video" || c.type === "image")
+      .sort((a, b) => a.startTime - b.startTime);
+
+    const active = visualClips.find(
+      (c) => currentTime >= c.startTime - EPS && currentTime < c.endTime - EPS
+    );
+
+    if (!active) return;
+
+    const sinceManual = performance.now() - (lastManualSelectRef.current || 0);
+    if (sinceManual < MANUAL_GRACE_MS) return;
+
+    if (active.id !== selectedClipId) {
+      setSelectedClipId(active.id);
+    }
+  }, [currentTime, clips, selectedClipId, EPS]);
 
   const activeAudioClips = useMemo(() => {
     return clips
