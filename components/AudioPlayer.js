@@ -1,3 +1,4 @@
+// components/AudioPlayer.js
 import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 
 /** Tunables */
@@ -23,8 +24,13 @@ function getBuffer(url) {
   if (cache.has(url)) return cache.get(url);
   const ac = getAC();
   const p = fetch(url)
-    .then(r => r.arrayBuffer())
-    .then(ab => new Promise((res, rej) => ac.decodeAudioData(ab, res, rej)));
+    .then((r) => r.arrayBuffer())
+    .then(
+      (ab) =>
+        new Promise((res, rej) => {
+          ac.decodeAudioData(ab, res, rej);
+        })
+    );
   cache.set(url, p);
   return p;
 }
@@ -36,7 +42,7 @@ function visLen(c) {
   return Math.max(0, d - ts - te);
 }
 function clipEnd(c) {
-  return c.endTime ?? (c.startTime + visLen(c));
+  return c.endTime ?? c.startTime + visLen(c);
 }
 function inWindow(c, t) {
   const len = visLen(c);
@@ -48,7 +54,7 @@ function bufferOffsetFor(c, timelineT) {
   return Math.max(0, Math.min(off, max));
 }
 
-/** Active sources: id -> { source, gain, startedAtCtx, endsAtTimeline, clipSnapshot } */
+/** Active sources: id -> { source, gain, startedAtCtx, endsAtTimeline, clipSnapshot, teardownTimerId, onendedHandler } */
 const active = new Map();
 
 function fade(gainNode, tStart, from, to, dur) {
@@ -58,179 +64,311 @@ function fade(gainNode, tStart, from, to, dur) {
   g.linearRampToValueAtTime(to, tStart + Math.max(0.001, dur));
 }
 
-function startClip(ac, clip, timelineNow, masterVol) {
-  // Avoid double-start
+/** Aggressive teardown for a clip's active source */
+function stopClip(id, fast = false) {
+  const e = active.get(id);
+  if (!e) return;
+  try {
+    // cancel any pending cleanup timer
+    if (e.teardownTimerId != null) {
+      clearTimeout(e.teardownTimerId);
+      e.teardownTimerId = null;
+    }
+
+    // remove onended handler to avoid double-cleanup races
+    try {
+      if (e.onendedHandler && e.source) {
+        e.source.onended = null;
+      }
+    } catch {}
+
+    // cancel scheduled gain ramps at once, then stop
+    try {
+      const now = AC.currentTime;
+      e.gain.gain.cancelScheduledValues(now);
+      e.gain.gain.setValueAtTime(0.0001, now);
+    } catch {}
+
+    try {
+      e.source.stop(0);
+    } catch (err) {
+      // ignore if already stopped/ended
+    }
+
+    // disconnect nodes
+    try {
+      e.source.disconnect();
+    } catch {}
+    try {
+      e.gain.disconnect();
+    } catch {}
+  } catch (err) {
+    // swallow errors — we still want to remove the entry
+  }
+  active.delete(id);
+}
+
+/** Stop and clear all playing/scheduled pieces */
+function stopAll() {
+  for (const id of Array.from(active.keys())) {
+    stopClip(id);
+  }
+}
+
+/** Create and schedule a single continuous BufferSource for a clip */
+function startClip(ac, clip, timelineNow, masterVol, sessionAtStart, isPlayingRef, sessionRef) {
   if (active.has(clip.id)) return;
 
   const startTL = Math.max(timelineNow, clip.startTime);
   const endTL = clipEnd(clip);
   if (endTL <= startTL) return;
 
-  return getBuffer(clip.url).then(buffer => {
-    if (!buffer) return;
+  return getBuffer(clip.url)
+    .then((buffer) => {
+      // Guard: if session changed or we are no longer playing, bail out
+      if (!buffer || !isPlayingRef.current || sessionRef.current !== sessionAtStart) return;
 
-    // Compute offsets and durations
-    const when = ac.currentTime + (startTL - timelineNow); // schedule relative to now
-    const offset = bufferOffsetFor(clip, startTL);
-    const maxPlayable = Math.max(0, buffer.duration - offset);
-    const dur = Math.min(endTL - startTL, maxPlayable);
-    if (dur <= 0) return;
+      const when = ac.currentTime + (startTL - timelineNow);
+      const offset = bufferOffsetFor(clip, startTL);
+      const maxPlayable = Math.max(0, buffer.duration - offset);
+      const dur = Math.min(endTL - startTL, maxPlayable);
+      if (dur <= 0) return;
 
-    // Nodes
-    const src = ac.createBufferSource();
-    src.buffer = buffer;
-    const g = ac.createGain();
+      const src = ac.createBufferSource();
+      src.buffer = buffer;
+      const g = ac.createGain();
 
-    const perClip = clip.gain != null ? clip.gain : 1;
-    const targetGain = Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
+      const perClip = clip.gain != null ? clip.gain : 1;
+      const targetGain =
+        Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
 
-    // start near silent, fade in
-    g.gain.setValueAtTime(0.0001, when);
-    fade(g, when, 0.0001, targetGain, FADE_SEC);
-
-    src.connect(g).connect(MASTER);
-
-    try {
-      src.start(when, offset, dur);
-    } catch {
-      return; // scheduling in the past, skip
-    }
-
-    // Fade out at the real end only
-    const outStart = when + dur - FADE_SEC;
-    if (outStart > ac.currentTime) {
-      fade(g, outStart, targetGain, 0.0001, FADE_SEC);
-    }
-
-    // Auto cleanup
-    const endsAtCtx = when + dur;
-    const teardown = () => {
-      const entry = active.get(clip.id);
-      if (!entry) return;
-      if (AC.currentTime >= endsAtCtx - 0.01) {
-        active.delete(clip.id);
-      } else {
-        setTimeout(teardown, 50);
+      // Final guard just before scheduling (race between decode and user actions)
+      if (!isPlayingRef.current || sessionRef.current !== sessionAtStart) {
+        try {
+          src.disconnect();
+          g.disconnect();
+        } catch {}
+        return;
       }
-    };
-    setTimeout(teardown, (dur + 0.1) * 1000);
 
-    // Track it
-    active.set(clip.id, {
-      source: src,
-      gain: g,
-      startedAtCtx: when,
-      endsAtTimeline: startTL + dur,
-      clipSnapshot: { startTime: clip.startTime, endTime: clip.endTime, trimStart: clip.trimStart, trimEnd: clip.trimEnd, url: clip.url, gain: clip.gain },
+      // ramp/gain setup
+      g.gain.setValueAtTime(0.0001, when);
+      fade(g, when, 0.0001, targetGain, FADE_SEC);
+
+      src.connect(g).connect(MASTER);
+
+      try {
+        src.start(when, offset, dur);
+      } catch (err) {
+        try {
+          src.disconnect();
+        } catch {}
+        try {
+          g.disconnect();
+        } catch {}
+        return;
+      }
+
+      // schedule fade-out at end
+      const outStart = when + dur - FADE_SEC;
+      if (outStart > ac.currentTime) {
+        fade(g, outStart, targetGain, 0.0001, FADE_SEC);
+      }
+
+      // define onended handler for extra safety
+      const onendedHandler = () => {
+        if (active.has(clip.id)) {
+          try {
+            src.onended = null;
+          } catch {}
+          active.delete(clip.id);
+        }
+      };
+      try {
+        src.onended = onendedHandler;
+      } catch {}
+
+      // track entry and a teardown timer that removes the entry after it's done
+      const endsAtCtx = when + dur;
+      const entry = {
+        source: src,
+        gain: g,
+        startedAtCtx: when,
+        endsAtTimeline: startTL + dur,
+        clipSnapshot: {
+          startTime: clip.startTime,
+          endTime: clip.endTime,
+          trimStart: clip.trimStart,
+          trimEnd: clip.trimEnd,
+          url: clip.url,
+          gain: clip.gain,
+        },
+        teardownTimerId: null,
+        onendedHandler,
+      };
+      active.set(clip.id, entry);
+
+      // cleanup timer (ensures we delete entry even if onended doesn't fire)
+      const teardown = () => {
+        const cur = active.get(clip.id);
+        if (!cur) return;
+        if (AC.currentTime >= endsAtCtx - 0.01) {
+          try {
+            cur.source.onended = null;
+          } catch {}
+          try {
+            cur.source.disconnect();
+          } catch {}
+          try {
+            cur.gain.disconnect();
+          } catch {}
+          active.delete(clip.id);
+        } else {
+          entry.teardownTimerId = setTimeout(teardown, 50);
+        }
+      };
+      entry.teardownTimerId = setTimeout(teardown, (dur + 0.1) * 1000);
+    })
+    .catch(() => {
+      // decode failed — nada
     });
-  });
 }
 
-function stopClip(id, fast = false) {
-  const e = active.get(id);
-  if (!e) return;
-  try {
-    if (fast) {
-      e.source.stop();
-    } else {
-      // short fade out, then stop
-      const now = AC.currentTime;
-      const cur = e.gain.gain.value;
-      fade(e.gain, now, cur, 0.0001, FADE_SEC);
-      setTimeout(() => { try { e.source.stop(); } catch {} }, FADE_SEC * 1000 + 5);
-    }
-  } catch {}
-  active.delete(id);
-}
-
-function stopAll() {
-  for (const id of Array.from(active.keys())) stopClip(id, true);
-}
-
-const AudioPlayer = forwardRef(function AudioPlayer({
-  activeAudioClips, // array of audio clips overlapping the current time
-  isPlaying,
-  currentTime,
-  seekAudio,        // bump on discrete seeks
-  clips,            // (unused here, but fine to keep)
-  activeVisualType, // (unused here)
-  masterVolume = 1,
-}, ref) {
+/** The React component */
+const AudioPlayer = forwardRef(function AudioPlayer(
+  {
+    activeAudioClips,
+    isPlaying,
+    currentTime,
+    seekAudio,
+    clips, // now used for prefetch
+    activeVisualType, // used to tune scheduling behavior
+    masterVolume = 1,
+  },
+  ref
+) {
   const lastSeekRef = useRef(seekAudio);
   const masterVolRef = useRef(masterVolume);
 
-  useImperativeHandle(ref, () => ({
-    stopAll() { stopAll(); },
-    setMasterVolume(v) {
-      masterVolRef.current = Math.max(0, Math.min(1, v));
-      const ac = getAC();
-      MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
-    },
-  }), []);
+  // session token to invalidate late decodes
+  const sessionRef = useRef(0);
+  const isPlayingRef = useRef(false);
 
-  // keep master volume node in sync
+  useImperativeHandle(
+    ref,
+    () => ({
+      stopAll() {
+        sessionRef.current += 1;
+        stopAll();
+      },
+      setMasterVolume(v) {
+        masterVolRef.current = Math.max(0, Math.min(1, v));
+        const ac = getAC();
+        MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+      },
+    }),
+    []
+  );
+
+  // Prefetch audio buffers for all audio clips when `clips` changes.
+  // This reduces decode latency and the race window where late decodes can start unexpectedly.
+  useEffect(() => {
+    if (!clips || !Array.isArray(clips)) return;
+    for (const c of clips) {
+      if (c.type === "audio" && c.url) {
+        // fire-and-forget: cache.getBuffer will dedupe
+        getBuffer(c.url).catch(() => {
+          /* ignore decode errors here */
+        });
+      }
+    }
+  }, [clips]);
+
+  // master volume sync
   useEffect(() => {
     masterVolRef.current = Math.max(0, Math.min(1, masterVolume));
     const ac = getAC();
     MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
   }, [masterVolume]);
 
-  // play/pause gate
+  // play/pause gate — suspend context & increment session on pause
   useEffect(() => {
     const ac = getAC();
-    if (isPlaying) ac.resume?.();
-    else stopAll();
+    isPlayingRef.current = isPlaying;
+    sessionRef.current += 1; // invalidate decodes started earlier
+
+    if (isPlaying) {
+      ac.resume?.();
+    } else {
+      stopAll();
+      try {
+        ac.suspend?.();
+      } catch {}
+    }
   }, [isPlaying]);
 
-  // discrete seek: hard stop & let next effect restart what’s needed
+  // discrete seek: hard stop + new session token
   useEffect(() => {
     if (seekAudio !== lastSeekRef.current) {
       lastSeekRef.current = seekAudio;
+      sessionRef.current += 1;
       stopAll();
     }
   }, [seekAudio]);
 
-  // main scheduling: maintain exactly one continuous source per active clip
+  // main scheduler
   useEffect(() => {
     if (!isPlaying) return;
 
     const ac = getAC();
+    const sessionAtTick = sessionRef.current;
 
-    // 1) Start any active clip that isn't already running
+    // allow less-aggressive corrections while displaying an image
+    const suppressContinuousCorrections = activeVisualType === "image";
+
     const wantedIds = new Set();
     for (const clip of activeAudioClips) {
       wantedIds.add(clip.id);
 
       const e = active.get(clip.id);
-
-      // If already playing but its timing definition changed (drag/trim/url), restart it
       if (e) {
-        const snap = e.clipSnapshot;
+        const s = e.clipSnapshot;
+        // If timing or url/gain changed, restart the source (still do it)
         if (
-          snap.startTime !== clip.startTime ||
-          snap.endTime !== clip.endTime ||
-          snap.trimStart !== clip.trimStart ||
-          snap.trimEnd !== clip.trimEnd ||
-          snap.url !== clip.url ||
-          snap.gain !== clip.gain
+          s.startTime !== clip.startTime ||
+          s.endTime !== clip.endTime ||
+          s.trimStart !== clip.trimStart ||
+          s.trimEnd !== clip.trimEnd ||
+          s.url !== clip.url ||
+          s.gain !== clip.gain
         ) {
+          // When showing an image we try to avoid tiny drift restarts, but if the clip definitively changed we restart.
           stopClip(clip.id, true);
         }
       }
 
       if (!active.has(clip.id)) {
-        startClip(ac, clip, currentTime, masterVolRef.current);
+        // extra guard: only schedule if actually overlapping now
+        if (inWindow(clip, currentTime) || inWindow(clip, currentTime + 0.001)) {
+          // pass sessionAtTick / refs down to startClip for safety
+          startClip(ac, clip, currentTime, masterVolRef.current, sessionAtTick, isPlayingRef, sessionRef);
+        }
       }
     }
 
-    // 2) Stop anything no longer active (clip left the window)
+    // stop anything no longer active
     for (const id of Array.from(active.keys())) {
       if (!wantedIds.has(id)) stopClip(id, false);
     }
-  }, [isPlaying, currentTime, activeAudioClips]);
+  }, [isPlaying, currentTime, activeAudioClips, activeVisualType]);
 
   // cleanup on unmount
-  useEffect(() => () => stopAll(), []);
+  useEffect(() => {
+    return () => {
+      sessionRef.current += 1;
+      stopAll();
+    };
+  }, []);
 
   return null;
 });

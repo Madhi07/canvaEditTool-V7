@@ -15,7 +15,7 @@ export default function Home() {
     {
       id: "default-clip",
       type: "video",
-      url: "/parameters_example.mp4", // default demo video in /public
+      url: "/parameters_example.mp4",
       fileName: "parameters_example.mp4",
       mimeType: "video/mp4",
       duration: 10,
@@ -30,7 +30,7 @@ export default function Home() {
   ]);
 
   const [selectedClipId, setSelectedClipId] = useState("default-clip");
-  const [currentTime, setCurrentTime] = useState(0); // seconds (global timeline time)
+  const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [totalDuration, setTotalDuration] = useState(10);
   const [videoZoom, setVideoZoom] = useState(1);
@@ -49,18 +49,12 @@ export default function Home() {
     totalDurationRef.current = totalDuration;
   }, [totalDuration]);
 
-  // If you want to call methods on AudioPlayer you can add a ref and wire methods there
   const audioPlayerRef = useRef(null);
 
-  // placeholder: central stop all audio hook — connect into AudioPlayer if needed
   const stopAllAudio = useCallback(() => {
-    // If your AudioPlayer exposes a stopAll method, call it via ref here:
     audioPlayerRef.current?.stopAll?.();
-    // For now just ensure playback flag false
-    // setIsPlaying(false);
   }, []);
 
-  // Load default video metadata + thumbnail for default clip
   useEffect(() => {
     const defaultClip = clips.find((c) => c.id === "default-clip");
     if (!defaultClip) return;
@@ -106,7 +100,6 @@ export default function Home() {
     loadDefaultMetadata();
   }, []);
 
-  // Auto-calculate total timeline duration (visuals only)
   useEffect(() => {
     if (!clips.length) return;
 
@@ -121,7 +114,6 @@ export default function Home() {
     setTotalDuration(maxVisualEnd);
   }, [clips]);
 
-  // Handle clip end: move to next visual or stop
   const handleClipEnd = useCallback(
     (endedClipId) => {
       const visualClips = clipsRef.current
@@ -134,7 +126,6 @@ export default function Home() {
         const nextClip = visualClips[idx + 1];
 
         setSelectedClipId(nextClip.id);
-        // Nudge into the clip to avoid falling on boundary
         const startInside =
           nextClip.type === "image"
             ? nextClip.startTime + EPS
@@ -150,7 +141,6 @@ export default function Home() {
     [isPlaying, stopAllAudio]
   );
 
-  // Media upload (video/image/audio)
   const handleMediaUpload = async (file, type) => {
     const url = URL.createObjectURL(file);
 
@@ -185,7 +175,6 @@ export default function Home() {
           ? Math.max(...audioClips.map((c) => c.endTime))
           : 0;
 
-      // Find the lowest free audio track (layering)
       const usedTracks = new Set(audioClips.map((c) => c.track));
       let nextTrack = 0;
       while (usedTracks.has(nextTrack)) nextTrack++;
@@ -223,7 +212,6 @@ export default function Home() {
     if (!selectedClipId) setSelectedClipId(newClip.id);
   };
 
-  // Split audio clip
   const handleSplitAudio = (clipId, splitTime) => {
     setClips((prevClips) => {
       const updated = [...prevClips];
@@ -264,7 +252,6 @@ export default function Home() {
     });
   };
 
-  // Arrange overlapping audio tracks into layers (track numbers)
   const fixAudioTrackLayers = (clipsArr) => {
     const audioClips = clipsArr.filter((c) => c.type === "audio");
     const sorted = [...audioClips].sort((a, b) => a.startTime - b.startTime);
@@ -328,14 +315,13 @@ export default function Home() {
     const visual = clips
       .filter((c) => c.type === "video" || c.type === "image")
       .find((c) => currentTime >= c.startTime && currentTime < c.endTime);
-    return visual?.type; // 'image' | 'video' | undefined
+    return visual?.type;
   })();
 
   const handleSeek = (time, clipId = null) => {
     const wasPlaying = isPlaying;
     const clamped = Math.max(0, Math.min(time, totalDuration - EPS));
 
-    // Figure out which visual we’re seeking into
     const visuals = clipsRef.current
       .filter((c) => c.type === "video" || c.type === "image")
       .sort((a, b) => a.startTime - b.startTime);
@@ -346,7 +332,6 @@ export default function Home() {
           (c) => clamped >= c.startTime - EPS && clamped < c.endTime - EPS
         );
 
-    // If we land on an IMAGE, nudge slightly inside the window and set the rAF guard
     if (targetClip && targetClip.type === "image") {
       const inside = Math.min(
         targetClip.endTime - EPS,
@@ -366,47 +351,49 @@ export default function Home() {
         console.log(`Seeked inside clip: ${clickedClip.fileName}`);
     }
 
-    // Stop audio immediately, then force re-seek
     audioPlayerRef.current?.stopAll?.();
     setSeekAudio((t) => t + 1);
 
-    // Resume only if we were playing pre-seek
     if (wasPlaying) setTimeout(() => setIsPlaying(true), 50);
   };
 
   const handlePlayPause = () => setIsPlaying((prev) => !prev);
 
-  // Time update from the visual player (maps local clip time -> global timeline)
+  // --- IMPORTANT CHANGE: ignore video timeupdate updates when clip is not a video
   const handleTimeUpdate = (timeSec, clipId) => {
     const currentClip = clipsRef.current.find((c) => c.id === clipId);
     if (!currentClip || !isPlaying) return;
 
+    // **NEW GUARD**: protect against stray timeupdate events from video frames
+    // that can race and move the timeline while we're trying to show an image.
+    if (currentClip.type !== "video") {
+      // If the player reported a timeupdate for a non-video clip (rare),
+      // ignore it — the timeline for images is driven by requestAnimationFrame.
+      return;
+    }
+
     const relativeTime = Math.max(0, timeSec - currentClip.trimStart);
     const globalTime = currentClip.startTime + relativeTime;
 
-    const epsilon = 0.05; // 50ms tolerance to avoid stopping early
+    const epsilon = 0.05;
 
     if (globalTime < currentClip.endTime - epsilon) {
       setCurrentTime(globalTime);
     } else if (globalTime >= currentClip.endTime - epsilon && isPlaying) {
-      // Snap exactly to the clip’s end and trigger stop
       setCurrentTime(currentClip.endTime);
       handleClipEnd(currentClip.id);
     }
   };
 
-  // Find current visual clip and return data for VideoPlayer
   const getCurrentClip = useCallback(() => {
     const visualClips = clips
       .filter((c) => c.type === "video" || c.type === "image")
       .sort((a, b) => a.startTime - b.startTime);
 
-    // inclusive start, exclusive end with epsilon guards
     let activeClip = visualClips.find(
       (c) => currentTime >= c.startTime - EPS && currentTime < c.endTime - EPS
     );
 
-    // If we're exactly at the very end, snap to the last visual
     if (
       !activeClip &&
       currentTime >= totalDuration - EPS &&
@@ -437,14 +424,12 @@ export default function Home() {
     };
   }, [currentTime, clips, totalDuration]);
 
-  // Ensure at least one clip selected
   useEffect(() => {
     if (clips.length && !selectedClipId) {
       setSelectedClipId(clips[0].id);
     }
   }, [clips, selectedClipId]);
 
-  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       const tag = (e.target.tagName || "").toUpperCase();
@@ -455,7 +440,7 @@ export default function Home() {
         tag === "SELECT" ||
         tag === "BUTTON";
 
-      if (isEditable) return; // don't hijack typing
+      if (isEditable) return;
 
       if (e.code === "Space") {
         e.preventDefault();
@@ -489,7 +474,6 @@ export default function Home() {
       window.removeEventListener("keydown", handleKeyDown, { capture: true });
   }, [currentTime, totalDuration, selectedClipId]);
 
-  // Automatically arrange visual clips sequentially (no gaps/overlaps)
   const autoReflowClips = (inputClips) => {
     const sorted = [...inputClips]
       .filter((c) => c.type === "video" || c.type === "image")
@@ -515,7 +499,6 @@ export default function Home() {
     return [...adjusted, ...nonVisuals];
   };
 
-  // 🔁 Image clip playback: rAF drives ONLY while on an image
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -534,7 +517,6 @@ export default function Home() {
     const tick = (now) => {
       if (!running) return;
 
-      // compute dt and clamp
       let dt = (now - lastNow) / 1000;
       if (dt > MAX_DT) dt = MAX_DT;
       lastNow = now;
@@ -545,39 +527,32 @@ export default function Home() {
 
         const active = findActiveAt(prev, visuals);
 
-        // If no active visual, we probably finished. Snap to true end & stop.
         if (!active) {
           running = false;
           setIsPlaying(false);
           const end = Math.max(...visuals.map((c) => c.endTime));
-          return end; // snap to true end (fixes 0:10/0:11 display too)
+          return end;
         }
 
-        // Only advance time here if the active visual is an IMAGE.
         if (active.type !== "image") {
-          // reset image-entry markers so next image starts inside
           enteredImageRef.current = false;
           lastVisualIdRef.current = active.id;
-          return prev; // let <video> drive time via onTimeUpdate
+          return prev;
         }
 
-        // First frame after entering this image: nudge just inside its window
         const firstTimeOnThisImage =
           lastVisualIdRef.current !== active.id || !enteredImageRef.current;
         if (firstTimeOnThisImage) {
           enteredImageRef.current = true;
           lastVisualIdRef.current = active.id;
-          // If we're at/before start, push slightly inside to avoid "stuck at start"
           return Math.max(prev, active.startTime + EPS);
         }
 
-        // Regular advance inside the image
         const nextT = prev + dt;
         const imgEnd = active.endTime - EPS;
 
         if (nextT < imgEnd) return nextT;
 
-        // Hand off to the next visual (exact start for videos, +EPS for images)
         const idx = visuals.findIndex((c) => c.id === active.id);
         if (idx >= 0 && idx < visuals.length - 1) {
           const nxt = visuals[idx + 1];
@@ -586,10 +561,9 @@ export default function Home() {
           return nxt.type === "image" ? nxt.startTime + EPS : nxt.startTime;
         }
 
-        // No more visuals: stop at the true end
         running = false;
         setIsPlaying(false);
-        return active.endTime; // true end, not end - EPS
+        return active.endTime;
       });
 
       rafId = requestAnimationFrame(tick);
@@ -600,9 +574,8 @@ export default function Home() {
       running = false;
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [isPlaying /* keep deps minimal so the loop stays stable */]);
+  }, [isPlaying]);
 
-  // This preserves your "echo" behavior: multiple audio clips overlapping will all be active.
   const activeAudioClips = useMemo(() => {
     return clips
       .filter(
@@ -614,17 +587,14 @@ export default function Home() {
       .sort((a, b) => (a.track ?? 0) - (b.track ?? 0));
   }, [clips, currentTime, totalDuration]);
 
-  // Render
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">
       <div className="container mx-auto px-6 py-6 space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold text-indigo-600">Video Editor</h1>
           <MediaUploader onMediaUpload={handleMediaUpload} />
         </div>
 
-        {/* Player */}
         <div className="p-4">
           <VideoPlayer
             currentClip={getCurrentClip()}
@@ -640,7 +610,6 @@ export default function Home() {
           />
         </div>
 
-        {/* Timeline */}
         <div className="p-4">
           <Timeline
             clips={clips}
@@ -655,9 +624,7 @@ export default function Home() {
           />
         </div>
 
-        {/* Audio player (hidden) - receives ALL overlapping audio clips */}
         <AudioPlayer
-          // ref={audioPlayerRef} // optional: requires AudioPlayer to forwardRef if you want to call methods
           activeAudioClips={activeAudioClips}
           isPlaying={isPlaying}
           currentTime={currentTime}
@@ -666,7 +633,6 @@ export default function Home() {
           activeVisualType={activeVisualType}
         />
 
-        {/* Toolbar */}
         <div className="rounded-xl bg-white p-4 shadow-md border border-gray-200 flex justify-between items-center">
           <Toolbar
             currentTime={currentTime}
