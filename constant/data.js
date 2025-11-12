@@ -19,7 +19,6 @@ const ClipsData = [
             "A playful dog sitting, looking directly into the camera.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "796cd29b-9221-43f4-8576-bb5661797960",
@@ -31,6 +30,7 @@ const ClipsData = [
         },
         image_id: "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
         audio_id: "796cd29b-9221-43f4-8576-bb5661797960",
+        duration: 6.6
       },
       {
         uuid: "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
@@ -45,7 +45,6 @@ const ClipsData = [
             "The dog wearing trendy sunglasses, looking chic and confident.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "29c7b149-d9a6-4257-9f96-4164c0938cdb",
@@ -57,6 +56,7 @@ const ClipsData = [
         },
         image_id: "d43c608f-acb1-493d-9f8c-32ac47c5e659",
         audio_id: "29c7b149-d9a6-4257-9f96-4164c0938cdb",
+        duration: 6.74
       },
       {
         uuid: "fb6a0dd2-ae62-4bf8-a200-040da423ec17",
@@ -71,7 +71,6 @@ const ClipsData = [
             "The dog posing like a model, front paws forward and head slightly tilted.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "1eca728b-5832-4fa6-9178-be3e8d699cbf",
@@ -83,6 +82,7 @@ const ClipsData = [
         },
         image_id: "430f7b28-54b3-4f67-94a3-d207232c0d45",
         audio_id: "1eca728b-5832-4fa6-9178-be3e8d699cbf",
+        duration: 6
       },
       {
         uuid: "a7057bb7-5dfc-49d5-8c97-a72964dc035e",
@@ -97,7 +97,6 @@ const ClipsData = [
             "A close-up of a polaroid camera capturing the dog's photo.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "fcf586df-1466-416c-b5f2-072e39881125",
@@ -108,6 +107,7 @@ const ClipsData = [
         },
         image_id: "4311a2fa-375c-453c-9424-d48f51df1d83",
         audio_id: "fcf586df-1466-416c-b5f2-072e39881125",
+        duration: 6
       },
       {
         uuid: "b2c8b017-c81d-4bd7-a6e8-c60427a89750",
@@ -122,7 +122,6 @@ const ClipsData = [
             "The developed polaroid photo showing the dog in sunglasses.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "abdd3f35-d590-406c-a40a-1cb4f728e690",
@@ -133,6 +132,7 @@ const ClipsData = [
         },
         image_id: "19ce357a-f6b1-46ff-9a47-54db5dac0154",
         audio_id: "abdd3f35-d590-406c-a40a-1cb4f728e690",
+        duration: 6
       },
       {
         uuid: "23e02c30-fcc5-474b-a548-0d6f2f169acc",
@@ -147,7 +147,6 @@ const ClipsData = [
             "The polaroid photo being shared, with a group of friends enjoying it.",
           asset_type: "ai_generated",
           status: "success",
-          duration: 6,
         },
         audio: {
           uuid: "ad7c5d50-84eb-4ba7-8582-db4522654db0",
@@ -158,6 +157,7 @@ const ClipsData = [
         },
         image_id: "a987d7a9-85e9-4b14-bc26-2551a7a1a055",
         audio_id: "ad7c5d50-84eb-4ba7-8582-db4522654db0",
+        duration: 6
       },
     ],
   },

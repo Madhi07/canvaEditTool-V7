@@ -408,7 +408,30 @@ export default function Home() {
     if (wasPlaying) setTimeout(() => setIsPlaying(true), 50);
   };
 
-  const handlePlayPause = () => setIsPlaying((prev) => !prev);
+  // ---- FIX: when toggling Play, if currentTime is at/after the end -> seek to first visual start
+  const handlePlayPause = useCallback(() => {
+    setIsPlaying((prev) => {
+      const willPlay = !prev;
+      if (willPlay) {
+        const visuals = clipsRef.current
+          .filter((c) => c.type === "video" || c.type === "image")
+          .sort((a, b) => a.startTime - b.startTime);
+        if (visuals.length) {
+          const maxEnd = Math.max(...visuals.map((c) => c.endTime));
+          // if we're at/after end, reset to first visual start so playback begins correctly
+          if (currentTime >= maxEnd - EPS || currentTime >= totalDuration - EPS) {
+            const firstStart = visuals[0].startTime || 0;
+            // small epsilon to ensure image logic works
+            setCurrentTime(Math.max(0, firstStart + EPS));
+            // stop audio players too (we will restart them via effect)
+            audioPlayerRef.current?.stopAll?.();
+            setSeekAudio((t) => t + 1);
+          }
+        }
+      }
+      return willPlay;
+    });
+  }, [currentTime, totalDuration, EPS]);
 
   // --- IMPORTANT CHANGE: ignore video timeupdate updates when clip is not a video
   const handleTimeUpdate = (timeSec, clipId) => {
@@ -473,7 +496,7 @@ export default function Home() {
       relativeTime: clampedRelativeTime,
       hasAudio: activeClip.hasAudio,
     };
-  }, [currentTime, clips, totalDuration]);
+  }, [currentTime, clips, totalDuration, EPS]);
 
   useEffect(() => {
     if (clips.length && !selectedClipId) {
@@ -523,7 +546,7 @@ export default function Home() {
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [currentTime, totalDuration, selectedClipId]);
+  }, [currentTime, totalDuration, selectedClipId, handlePlayPause]);
 
   const autoReflowClips = (inputClips) => {
     const sorted = [...inputClips]
@@ -579,10 +602,20 @@ export default function Home() {
         const active = findActiveAt(prev, visuals);
 
         if (!active) {
+          // ---- FIX: if there is no active visual but currentTime is before the first visual,
+          // advance into the first visual instead of jumping to the end.
+          const firstVisual = visuals[0];
+          const lastVisualEnd = Math.max(...visuals.map((c) => c.endTime));
+          if (prev < (firstVisual.startTime + EPS)) {
+            // move to first visual start (small EPS to avoid image-first-time edge)
+            lastVisualIdRef.current = firstVisual.id;
+            return Math.max(prev, firstVisual.startTime + EPS);
+          }
+
+          // otherwise assume we truly reached the end -> stop and set to end
           running = false;
           setIsPlaying(false);
-          const end = Math.max(...visuals.map((c) => c.endTime));
-          return end;
+          return lastVisualEnd;
         }
 
         if (active.type !== "image") {
@@ -728,7 +761,7 @@ export default function Home() {
       // Fetch audio durations in parallel (with fallback)
       const audioDurationPromises = slides.map((s) =>
         s?.audio?.audio_url
-          ? getRemoteAudioDuration(s.audio.audio_url, Number(s?.image?.duration) || 3)
+          ? getRemoteAudioDuration(s.audio.audio_url, Number(s?.duration) || 3)
           : Promise.resolve(null)
       );
 
