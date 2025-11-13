@@ -85,7 +85,8 @@ export default function Home() {
               : ClipsData;
           const slides = Array.isArray(dataEntry?.slides)
             ? dataEntry.slides
-            : Array.isArray(ClipsData) && ClipsData.every((s) => s && (s.image || s.image_url || s.url))
+            : Array.isArray(ClipsData) &&
+              ClipsData.every((s) => s && (s.image || s.image_url || s.url))
             ? ClipsData
             : null;
           if (slides && slides.length) return true;
@@ -419,7 +420,10 @@ export default function Home() {
         if (visuals.length) {
           const maxEnd = Math.max(...visuals.map((c) => c.endTime));
           // if we're at/after end, reset to first visual start so playback begins correctly
-          if (currentTime >= maxEnd - EPS || currentTime >= totalDuration - EPS) {
+          if (
+            currentTime >= maxEnd - EPS ||
+            currentTime >= totalDuration - EPS
+          ) {
             const firstStart = visuals[0].startTime || 0;
             // small epsilon to ensure image logic works
             setCurrentTime(Math.max(0, firstStart + EPS));
@@ -606,7 +610,7 @@ export default function Home() {
           // advance into the first visual instead of jumping to the end.
           const firstVisual = visuals[0];
           const lastVisualEnd = Math.max(...visuals.map((c) => c.endTime));
-          if (prev < (firstVisual.startTime + EPS)) {
+          if (prev < firstVisual.startTime + EPS) {
             // move to first visual start (small EPS to avoid image-first-time edge)
             lastVisualIdRef.current = firstVisual.id;
             return Math.max(prev, firstVisual.startTime + EPS);
@@ -709,7 +713,8 @@ export default function Home() {
         a.preload = "metadata";
 
         const onMeta = () => {
-          const d = isFinite(a.duration) && a.duration > 0 ? a.duration : fallback;
+          const d =
+            isFinite(a.duration) && a.duration > 0 ? a.duration : fallback;
           cleanup();
           resolve(d);
         };
@@ -753,7 +758,8 @@ export default function Home() {
 
       const slides = Array.isArray(dataEntry.slides)
         ? dataEntry.slides
-        : Array.isArray(ClipsData) && ClipsData.every((s) => s && (s.image || s.image_url || s.url))
+        : Array.isArray(ClipsData) &&
+          ClipsData.every((s) => s && (s.image || s.image_url || s.url))
         ? ClipsData
         : null;
       if (!slides || !slides.length) return;
@@ -776,31 +782,53 @@ export default function Home() {
         const imageObj = slide.image || {};
         const audioObj = slide.audio || {};
 
-        // support alternate shapes: slide.image_url or slide.imageUrl
-        const imageUrl = imageObj.image_url || slide.image_url || slide.imageUrl || null;
+        // support alternate shapes
+        const imageUrl =
+          imageObj.image_url || slide.image_url || slide.imageUrl || null;
+        const videoUrl =
+          imageObj.video_url || slide.video_url || slide.videoUrl || null;
+
+        // prefer explicit per-slide duration, fallback to imageObj.duration or slide.duration or 3
         const visualDuration = Number(imageObj.duration || slide.duration) || 3;
+
         const visualId =
-          slide.uuid || `visual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          slide.uuid ||
+          `visual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const visualStart = visualCursor;
         const visualEnd = visualStart + visualDuration;
 
+        // determine type + fields
+        const isVideo = Boolean(videoUrl);
+        const visualType = isVideo ? "video" : "image";
+        const visualSrc = isVideo ? videoUrl : imageUrl;
+        const fileName = visualSrc
+          ? visualSrc.split("/").pop()
+          : `${visualType}-${visualId}`;
+        const mimeType = isVideo
+          ? "video/mp4"
+          : visualSrc?.endsWith(".png")
+          ? "image/png"
+          : "image/jpeg";
+
         const visualClip = {
           id: visualId,
-          type: "image",
-          url: imageUrl || "",
-          fileName: imageUrl ? imageUrl.split("/").pop() : `image-${visualId}`,
-          mimeType: imageUrl?.endsWith(".png") ? "image/png" : "image/jpeg",
+          type: visualType,
+          url: visualSrc || "",
+          fileName,
+          mimeType,
           duration: visualDuration,
           startTime: visualStart,
           endTime: visualEnd,
           trimStart: 0,
           trimEnd: 0,
           hasAudio: !!(audioObj && audioObj.audio_url),
-          thumbnail: imageUrl || null,
+          // thumbnail: keep imageUrl for images; for videos we could extract thumbnails later
+          thumbnail: isVideo ? null : imageUrl || null,
           track: 0,
         };
         newClips.push(visualClip);
 
+        // attach audio clip if present
         if (audioObj && audioObj.audio_url) {
           const audioDur = audioDurations[i] || visualDuration;
           const audioClip = {
@@ -836,11 +864,15 @@ export default function Home() {
       // ensure selection and total duration update
       setTimeout(() => {
         const allClipsNow = clipsRef.current;
-        const firstVisual = allClipsNow.find((c) => c.type === "image" || c.type === "video");
+        const firstVisual = allClipsNow.find(
+          (c) => c.type === "image" || c.type === "video"
+        );
         if (firstVisual) {
           setSelectedClipId((prev) => prev || firstVisual.id);
           const maxVisualEnd = Math.max(
-            ...allClipsNow.filter((c) => c.type === "video" || c.type === "image").map((c) => c.endTime)
+            ...allClipsNow
+              .filter((c) => c.type === "video" || c.type === "image")
+              .map((c) => c.endTime)
           );
           setTotalDuration((prev) => Math.max(prev, maxVisualEnd || 0));
         }

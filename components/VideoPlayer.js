@@ -168,9 +168,9 @@ export default function VideoPlayer({
           playerRef.current?.tech_?.el() ||
           playerRef.current?.el()?.querySelector("video");
         if (mediaEl) {
-          mediaEl.muted = true;
-          mediaEl.defaultMuted = true;
-          mediaEl.volume = 0;
+          mediaEl.muted = false;
+          mediaEl.defaultMuted = false;
+          mediaEl.volume = 1;
           try {
             if (mediaEl.audioTracks && mediaEl.audioTracks.length) {
               for (let i = 0; i < mediaEl.audioTracks.length; i++) {
@@ -250,9 +250,9 @@ export default function VideoPlayer({
         playerRef.current.el()?.querySelector("video");
     } catch {}
     if (!mediaEl) return;
-    mediaEl.muted = true;
-    mediaEl.defaultMuted = true;
-    mediaEl.volume = 0;
+    mediaEl.muted = false;
+    mediaEl.defaultMuted = false;
+    mediaEl.volume = 1;
     try {
       if (mediaEl.audioTracks && mediaEl.audioTracks.length) {
         for (let i = 0; i < mediaEl.audioTracks.length; i++) {

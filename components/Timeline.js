@@ -1,12 +1,17 @@
 // components/Timeline.js
 
 "use client";
-import { motion, useSpring } from "framer-motion";
-import { useState, useRef, useEffect } from "react";
+import { motion, useSpring, useMotionValue } from "framer-motion";
+import { useState, useRef, useEffect, useCallback } from "react";
 import AudioClipWaveform from "./AudioClipWaveform"; // Assuming this is in the same directory
 
 // Minimum duration in seconds to prevent trim collapse
 const MIN_CLIP_DURATION = 0.1;
+
+// Auto-scroll thresholds (tweak these if you want different feel)
+const AUTO_SCROLL_RIGHT_THRESHOLD = 0.90; // when playhead passes 90% of visible width
+const AUTO_SCROLL_LEFT_THRESHOLD = 0.10; // when playhead is before 10% of visible width
+const AUTO_SCROLL_TARGET_OFFSET_RATIO = 0.5; // target: make playhead appear ~50% from left
 
 export default function Timeline({
   clips = [],
@@ -41,6 +46,105 @@ export default function Timeline({
   const videoClipHeight = 80;
   const audioClipHeight = 50;
 
+  // ---- Framer-driven scroll logic ----
+  // motion value representing the target scrollLeft the UI should animate to.
+  const scrollTarget = useMotionValue(0);
+  // spring builds from the target so it animates smoothly
+  const scrollSpring = useSpring(scrollTarget, {
+    stiffness: 220,
+    damping: 28,
+    mass: 1,
+  });
+
+  // We subscribe the spring to write into the actual DOM scrollLeft.
+  useEffect(() => {
+    let unsub = null;
+    function setContainerScroll(v) {
+      const container =
+        timelineRef.current && timelineRef.current.parentElement
+          ? timelineRef.current.parentElement
+          : null;
+      if (!container) return;
+      // write only when value differs sufficiently to avoid micro writes
+      if (Math.abs(container.scrollLeft - v) > 0.5) {
+        container.scrollLeft = Math.round(v);
+      }
+    }
+    unsub = scrollSpring.on("change", setContainerScroll);
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [scrollSpring]);
+
+  // helper to read current container scroll safely
+  const getContainer = useCallback(() => {
+    return timelineRef.current && timelineRef.current.parentElement
+      ? timelineRef.current.parentElement
+      : null;
+  }, []);
+
+  // compute auto-scroll target whenever currentTime changes (playhead moves)
+  useEffect(() => {
+    // if user is dragging, don't auto-scroll
+    if (isDragging) return;
+
+    const container = getContainer();
+    if (!container || !timelineRef.current) return;
+
+    const visibleWidth = container.clientWidth;
+    if (visibleWidth <= 0) return;
+
+    const playheadX = currentTime * pixelsPerSecond;
+
+    const viewLeft = container.scrollLeft;
+    const viewRight = viewLeft + visibleWidth;
+
+    // compute px thresholds
+    const rightThresholdPx = visibleWidth * AUTO_SCROLL_RIGHT_THRESHOLD;
+    const leftThresholdPx = visibleWidth * AUTO_SCROLL_LEFT_THRESHOLD;
+
+    // If playhead beyond right threshold -> compute a target scrollLeft
+    if (playheadX > viewLeft + rightThresholdPx) {
+      // target is to position playhead at AUTO_SCROLL_TARGET_OFFSET_RATIO of visible width
+      // i.e. make playhead appear ~50% from left
+      const desiredVisibleX = visibleWidth * AUTO_SCROLL_TARGET_OFFSET_RATIO;
+      // compute scrollLeft so that playhead is at desiredVisibleX
+      let targetScrollLeft = Math.max(0, playheadX - desiredVisibleX);
+
+      // Cap the target so we don't scroll beyond content width
+      const maxScrollLeft = Math.max(0, timelineRef.current.scrollWidth - visibleWidth);
+      if (targetScrollLeft > maxScrollLeft) targetScrollLeft = maxScrollLeft;
+
+      // Only set if the new target differs enough from current scroll for a smooth animate
+      if (Math.abs(container.scrollLeft - targetScrollLeft) > 2) {
+        scrollTarget.set(targetScrollLeft);
+      }
+      return;
+    }
+
+    // if playhead before left threshold -> scroll left to reveal it (keep it at e.g. 10% pos)
+    if (playheadX < viewLeft + leftThresholdPx) {
+      const desiredVisibleX = visibleWidth * AUTO_SCROLL_LEFT_THRESHOLD;
+      let targetScrollLeft = Math.max(0, playheadX - desiredVisibleX);
+      if (targetScrollLeft < 0) targetScrollLeft = 0;
+      if (Math.abs(container.scrollLeft - targetScrollLeft) > 2) {
+        scrollTarget.set(targetScrollLeft);
+      }
+      return;
+    }
+
+    // otherwise keep as-is (no change)
+  }, [
+    currentTime,
+    pixelsPerSecond,
+    isDragging,
+    getContainer,
+    scrollTarget,
+    timelineRef,
+  ]);
+
+  // ---- end framer-driven scroll logic ----
+
   // Handle click to seek
   const handleTimelineClick = (e) => {
     if (!timelineRef.current || isDragging) return;
@@ -48,10 +152,7 @@ export default function Timeline({
     const rect = timelineRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const clickedTime = Math.max(
-      0,
-      Math.min(x / pixelsPerSecond, totalDuration)
-    );
+    const clickedTime = Math.max(0, Math.min(x / pixelsPerSecond, totalDuration));
 
     // Height assumptions (adjust based on your layout CSS)
     const videoTrackHeight = 80; // Height where video/image clips are placed
@@ -127,7 +228,7 @@ export default function Timeline({
       setDragPreviewX(e.clientX);
 
       if (dragType === "move") {
-        let newStartTime = Math.max(0, startSnapshotTime + deltaTime);
+        let newStartTime = startSnapshotTime + deltaTime;
         const clipDuration = endSnapshotTime - startSnapshotTime;
 
         // Update clip position live
@@ -318,7 +419,7 @@ export default function Timeline({
     onSeek,
   ]);
 
-  // Zoom controls (Unchanged from your previous code)
+  // Zoom controls
   const handleZoomIn = () => {
     setZoomLevel((prev) => Math.min(prev + 0.25, 3));
   };
@@ -343,7 +444,6 @@ export default function Timeline({
 
   // Sync scrolling - only timeline scrolls, time markers follow
   useEffect(() => {
-    // Ensure parentElement exists before adding listener
     if (
       !timelineRef.current ||
       !timelineRef.current.parentElement ||
@@ -583,7 +683,7 @@ export default function Timeline({
             </span>
           </div>
 
-          {/* 🟢 PUT THESE TWO NEW ELEMENTS RIGHT HERE */}
+          {/* Drag preview ghost */}
           {isDragging && dragType === "move" && dragClipId && (
             <motion.div
               className="absolute z-40 pointer-events-none rounded-lg overflow-hidden shadow-lg opacity-70 border border-blue-400"
@@ -605,7 +705,7 @@ export default function Timeline({
             </motion.div>
           )}
 
-          {/* 🧭 Drop indicator line */}
+          {/* Drop indicator line */}
           {hoverInsertTime !== null && (
             <motion.div
               className="absolute top-0 bottom-0 w-[3px] bg-blue-500 z-30 rounded-full"
@@ -617,14 +717,11 @@ export default function Timeline({
           {/* Clips */}
           {clips.map((clip) => {
             // FIX: Calculate timeline duration from trim values
-            const clipTimelineDuration =
-              clip.duration - clip.trimStart - clip.trimEnd;
+            const clipTimelineDuration = clip.duration - clip.trimStart - clip.trimEnd;
 
             // Ensure duration is not negative
             if (clipTimelineDuration < MIN_CLIP_DURATION) {
-              // This shouldn't happen with the new logic, but as a safeguard:
               console.warn("Clip duration is too small:", clip.id);
-              // You could choose to not render it, or render a minimal clip
             }
 
             const clipWidth = clipTimelineDuration * pixelsPerSecond;
@@ -706,8 +803,7 @@ export default function Timeline({
                               0,
                               Math.min(
                                 1,
-                                (currentTime - clip.startTime) /
-                                  clipTimelineDuration
+                                (currentTime - clip.startTime) / clipTimelineDuration
                               )
                             )
                           : 0
