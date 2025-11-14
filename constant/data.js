@@ -11,24 +11,15 @@ const ClipsData = [
         subtitle: "Meet the Star",
         explain_text:
           "Here's our star: a playful dog. He's ready for his close-up.",
-        
-        video: {
-          uuid: "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
-          video_url:
-            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/c291b6cd-243e-4de4-826e-e96c2f69f84a/final/final_video.mp4/e50af452-1b46-4e1a-b743-b61fd1e4ec66.mp4",
-          image_prompt:
-            "A playful dog sitting, looking directly into the camera.",
-          asset_type: "ai_generated",
-          status: "success",
-        },
         image: {
-          uuid: "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
+          uuid: "430f7b28-54b3-4f67-94a3-d207232c0d45",
           image_url:
-            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/d6a16ad4-12b3-4086-b1d9-aae3a20787e8/eab57c55-c3ca-4005-ad27-cee0d988199e.png",
+            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
           image_prompt:
-            "A playful dog sitting, looking directly into the camera.",
+            "The dog posing like a model, front paws forward and head slightly tilted.",
           asset_type: "ai_generated",
           status: "success",
+          image_duration: 6,
         },
         audio: {
           uuid: "796cd29b-9221-43f4-8576-bb5661797960",
@@ -40,7 +31,7 @@ const ClipsData = [
         },
         image_id: "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
         audio_id: "796cd29b-9221-43f4-8576-bb5661797960",
-        duration: 6.6,
+        // duration: 6.6,
       },
       {
         uuid: "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
@@ -55,6 +46,7 @@ const ClipsData = [
             "The dog wearing trendy sunglasses, looking chic and confident.",
           asset_type: "ai_generated",
           status: "success",
+          image_duration: 6.74,
         },
         audio: {
           uuid: "29c7b149-d9a6-4257-9f96-4164c0938cdb",
@@ -66,33 +58,33 @@ const ClipsData = [
         },
         image_id: "d43c608f-acb1-493d-9f8c-32ac47c5e659",
         audio_id: "29c7b149-d9a6-4257-9f96-4164c0938cdb",
-        duration: 6.74,
       },
       {
         uuid: "fb6a0dd2-ae62-4bf8-a200-040da423ec17",
         slide_number: 3,
         subtitle: "Strike a Pose",
         explain_text: "The dog strikes a pose. Snap that picture!",
-        image: {
-          uuid: "430f7b28-54b3-4f67-94a3-d207232c0d45",
-          image_url:
-            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
+        video: {
+          uuid: "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
+          video_url:
+            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/c291b6cd-243e-4de4-826e-e96c2f69f84a/final/final_video.mp4/e50af452-1b46-4e1a-b743-b61fd1e4ec66.mp4",
+          video_thumbnail: "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
           image_prompt:
-            "The dog posing like a model, front paws forward and head slightly tilted.",
+            "A playful dog sitting, looking directly into the camera.",
           asset_type: "ai_generated",
           status: "success",
+          video_duration: 20,
         },
         audio: {
           uuid: "1eca728b-5832-4fa6-9178-be3e8d699cbf",
           audio_url:
-            "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/1eca728b-5832-4fa6-9178-be3e8d699cbf/audio/c0da84eb-a782-4452-ada7-1ebaa1ab0425.mp3",
+            "",
           audio_prompt:
             "Watch as our fashionable canine strikes a perfect pose. Now, make sure to snap that picture!",
           status: "success",
         },
         image_id: "430f7b28-54b3-4f67-94a3-d207232c0d45",
         audio_id: "1eca728b-5832-4fa6-9178-be3e8d699cbf",
-        duration: 6,
       },
       {
         uuid: "a7057bb7-5dfc-49d5-8c97-a72964dc035e",
@@ -107,17 +99,17 @@ const ClipsData = [
             "A close-up of a polaroid camera capturing the dog's photo.",
           asset_type: "ai_generated",
           status: "success",
+          image_duration: 6,
         },
         audio: {
           uuid: "fcf586df-1466-416c-b5f2-072e39881125",
-          audio_url: "",
+          audio_url: "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/1eca728b-5832-4fa6-9178-be3e8d699cbf/audio/c0da84eb-a782-4452-ada7-1ebaa1ab0425.mp3",
           audio_prompt:
             "Let's capture this adorable and fun moment. A polaroid shot is being taken to freeze this memory.",
           status: "creating",
         },
         image_id: "4311a2fa-375c-453c-9424-d48f51df1d83",
         audio_id: "fcf586df-1466-416c-b5f2-072e39881125",
-        duration: 6,
       },
       {
         uuid: "b2c8b017-c81d-4bd7-a6e8-c60427a89750",
@@ -132,6 +124,7 @@ const ClipsData = [
             "The developed polaroid photo showing the dog in sunglasses.",
           asset_type: "ai_generated",
           status: "success",
+          image_duration: 6,
         },
         audio: {
           uuid: "abdd3f35-d590-406c-a40a-1cb4f728e690",
@@ -142,7 +135,6 @@ const ClipsData = [
         },
         image_id: "19ce357a-f6b1-46ff-9a47-54db5dac0154",
         audio_id: "abdd3f35-d590-406c-a40a-1cb4f728e690",
-        duration: 6,
       },
       {
         uuid: "23e02c30-fcc5-474b-a548-0d6f2f169acc",
@@ -157,6 +149,7 @@ const ClipsData = [
             "The polaroid photo being shared, with a group of friends enjoying it.",
           asset_type: "ai_generated",
           status: "success",
+          image_duration: 6,
         },
         audio: {
           uuid: "ad7c5d50-84eb-4ba7-8582-db4522654db0",
@@ -167,7 +160,6 @@ const ClipsData = [
         },
         image_id: "a987d7a9-85e9-4b14-bc26-2551a7a1a055",
         audio_id: "ad7c5d50-84eb-4ba7-8582-db4522654db0",
-        duration: 6,
       },
     ],
   },

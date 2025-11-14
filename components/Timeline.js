@@ -9,8 +9,8 @@ import AudioClipWaveform from "./AudioClipWaveform"; // Assuming this is in the 
 const MIN_CLIP_DURATION = 0.1;
 
 // Auto-scroll thresholds (tweak these if you want different feel)
-const AUTO_SCROLL_RIGHT_THRESHOLD = 0.90; // when playhead passes 90% of visible width
-const AUTO_SCROLL_LEFT_THRESHOLD = 0.10; // when playhead is before 10% of visible width
+const AUTO_SCROLL_RIGHT_THRESHOLD = 0.9; // when playhead passes 90% of visible width
+const AUTO_SCROLL_LEFT_THRESHOLD = 0.1; // when playhead is before 10% of visible width
 const AUTO_SCROLL_TARGET_OFFSET_RATIO = 0.5; // target: make playhead appear ~50% from left
 
 export default function Timeline({
@@ -112,7 +112,10 @@ export default function Timeline({
       let targetScrollLeft = Math.max(0, playheadX - desiredVisibleX);
 
       // Cap the target so we don't scroll beyond content width
-      const maxScrollLeft = Math.max(0, timelineRef.current.scrollWidth - visibleWidth);
+      const maxScrollLeft = Math.max(
+        0,
+        timelineRef.current.scrollWidth - visibleWidth
+      );
       if (targetScrollLeft > maxScrollLeft) targetScrollLeft = maxScrollLeft;
 
       // Only set if the new target differs enough from current scroll for a smooth animate
@@ -152,7 +155,10 @@ export default function Timeline({
     const rect = timelineRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const clickedTime = Math.max(0, Math.min(x / pixelsPerSecond, totalDuration));
+    const clickedTime = Math.max(
+      0,
+      Math.min(x / pixelsPerSecond, totalDuration)
+    );
 
     // Height assumptions (adjust based on your layout CSS)
     const videoTrackHeight = 80; // Height where video/image clips are placed
@@ -717,7 +723,8 @@ export default function Timeline({
           {/* Clips */}
           {clips.map((clip) => {
             // FIX: Calculate timeline duration from trim values
-            const clipTimelineDuration = clip.duration - clip.trimStart - clip.trimEnd;
+            const clipTimelineDuration =
+              clip.duration - clip.trimStart - clip.trimEnd;
 
             // Ensure duration is not negative
             if (clipTimelineDuration < MIN_CLIP_DURATION) {
@@ -743,6 +750,14 @@ export default function Timeline({
                 : clip.type === "audio"
                 ? "bg-blue-400"
                 : "bg-purple-500";
+
+            // Thumbnail logic inside map (fixed scope)
+            const thumb = clip.thumbnail;
+            const thumbIsImage =
+              !!thumb &&
+              typeof thumb === "string" &&
+              (thumb.startsWith("data:image/") ||
+                /\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i.test(thumb));
 
             return (
               <div
@@ -773,21 +788,39 @@ export default function Timeline({
                 }}
               >
                 {/* Visual content */}
-                {clip.type === "video" || clip.type === "image" ? (
-                  clip.thumbnail ? (
-                    <img
-                      src={clip.thumbnail}
-                      alt="clip"
-                      className="w-full h-full object-cover absolute inset-0 rounded-xl"
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-gray-600 flex items-center justify-center rounded-xl text-white">
-                      Loading...
-                    </div>
-                  )
-                ) : (
-                  <div className="w-full h-full bg-blue-400/80 absolute inset-0 rounded-xl"></div>
-                )}
+                {(() => {
+                  if (clip.type === "image") {
+                    return thumb ? (
+                      <img
+                        src={thumb}
+                        alt="clip"
+                        className="w-full h-full object-cover absolute inset-0 rounded-xl"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gray-600 flex items-center justify-center rounded-xl text-white">
+                        Loading...
+                      </div>
+                    );
+                  }
+
+                  if (clip.type === "video") {
+                    return thumbIsImage ? (
+                      <img
+                        src={thumb}
+                        alt="video thumbnail"
+                        className="w-full h-full object-cover absolute inset-0 rounded-xl"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gray-600 flex items-center justify-center rounded-xl text-white">
+                        Loading...
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="w-full h-full bg-blue-400/80 absolute inset-0 rounded-xl"></div>
+                  );
+                })()}
 
                 {/* Waveform Renderer for Audio Clips */}
                 {clip.type === "audio" && (
@@ -803,7 +836,8 @@ export default function Timeline({
                               0,
                               Math.min(
                                 1,
-                                (currentTime - clip.startTime) / clipTimelineDuration
+                                (currentTime - clip.startTime) /
+                                  clipTimelineDuration
                               )
                             )
                           : 0

@@ -49,6 +49,16 @@ export default function Home() {
   const [totalDuration, setTotalDuration] = useState(10);
   const [videoZoom, setVideoZoom] = useState(1);
   const [seekAudio, setSeekAudio] = useState(0);
+  const [externalClipsJson, setExternalClipsJson] = useState(() => {
+    try {
+      const base = Array.isArray(ClipsData) ? ClipsData : [ClipsData];
+      if (typeof structuredClone === "function") return structuredClone(base);
+      return JSON.parse(JSON.stringify(base));
+    } catch {
+      return Array.isArray(ClipsData) ? ClipsData : [ClipsData];
+    }
+  });
+
   const EPS = 0.002;
   const MAX_DT = 0.05;
   const justSeekedIntoImageRef = useRef(false);
@@ -163,6 +173,219 @@ export default function Home() {
 
     setTotalDuration(maxVisualEnd);
   }, [clips]);
+
+  // reorder visuals, auto-reflow them sequentially, and update app-state and external JSON
+  const commitMoveAndSync = useCallback(
+    (clipId, finalStart) => {
+      // Update the moved clip's start/end in the clips state
+      setClips((prev) => {
+        const prevCopy = prev.map((c) => ({ ...c }));
+        const target = prevCopy.find((c) => c.id === clipId);
+        if (!target) return prev;
+
+        const duration = Math.max(
+          0.001,
+          (target.duration || target.endTime - target.startTime) -
+            (target.trimStart || 0) -
+            (target.trimEnd || 0)
+        );
+        target.startTime = finalStart;
+        target.endTime = finalStart + duration;
+
+        // 1) sort visuals by start time, 2) auto-reflow visuals sequentially (pack)
+        const visuals = prevCopy
+          .filter((c) => c.type === "video" || c.type === "image")
+          .sort((a, b) => a.startTime - b.startTime || (a.id > b.id ? 1 : -1));
+
+        let cur = 0;
+        const reflowedVisuals = visuals.map((v) => {
+          const len = Math.max(
+            0.001,
+            v.duration - (v.trimStart || 0) - (v.trimEnd || 0)
+          );
+          const newV = { ...v, startTime: cur, endTime: cur + len };
+          cur += len;
+          return newV;
+        });
+
+        // replace visuals in prevCopy with reflowed visuals (keep non-visuals unchanged)
+        const nonVisuals = prevCopy.filter(
+          (c) => !(c.type === "video" || c.type === "image")
+        );
+        const merged = [...reflowedVisuals, ...nonVisuals];
+
+        // update tracks for audio layers (reuse your helper)
+        return fixAudioTrackLayers(merged);
+      });
+
+      // After setClips (state update queued), schedule a sync to ClipsData JSON
+      // Use timeout 0 to run after state update was applied
+      setTimeout(() => {
+        // read current clipsRef which is kept in sync via clipsRef.current
+        syncClipsToClipsData(clipsRef.current);
+      }, 0);
+    },
+    [
+      /* no deps required (fixAudioTrackLayers is hoisted) */
+    ]
+  );
+
+  // Build a new ClipsData structure from app clips (visual order -> slides order)
+  const syncClipsToClipsData = useCallback(async (currentClips) => {
+    if (!currentClips || !currentClips.length) return;
+
+    const deepClone = (o) => {
+      try {
+        return typeof structuredClone === "function"
+          ? structuredClone(o)
+          : JSON.parse(JSON.stringify(o));
+      } catch {
+        return JSON.parse(JSON.stringify(o));
+      }
+    };
+
+    // 1) visuals only, in timeline order
+    const visuals = [...currentClips]
+      .filter((c) => c.type === "video" || c.type === "image")
+      .sort((a, b) => a.startTime - b.startTime || (a.id > b.id ? 1 : -1));
+
+    // Build top-level audio lookup so we can copy durations when present
+    const topLevelAudioByUrl = new Map();
+    const topLevelAudioByFile = new Map();
+    currentClips
+      .filter((c) => c.type === "audio")
+      .forEach((a) => {
+        if (a.url) topLevelAudioByUrl.set(a.url, a);
+        if (a.fileName) topLevelAudioByFile.set(a.fileName, a);
+        if (a.url) {
+          const parts = a.url.split("/");
+          const last = parts[parts.length - 1];
+          if (last) topLevelAudioByFile.set(last, a);
+        }
+      });
+
+    // small helper to test images
+    const isLikelyImage = (url) => {
+      if (!url || typeof url !== "string") return false;
+      if (url.startsWith("data:image/")) return true;
+      return /\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i.test(url);
+    };
+
+    // 2) map visuals -> slides
+    const newSlides = visuals.map((v, idx) => {
+      const visibleLen = Math.max(
+        0,
+        Number(v.endTime - v.startTime || v.duration || 0)
+      );
+      const visibleLenRounded = Number(visibleLen.toFixed(2));
+
+      if (v._rawSlide) {
+        const clone = deepClone(v._rawSlide);
+
+        // update durations
+        if (v.type === "image") {
+          if (!clone.image) clone.image = {};
+          clone.image.image_duration = visibleLenRounded;
+        } else if (v.type === "video") {
+          if (!clone.video) clone.video = {};
+          clone.video.video_duration = visibleLenRounded;
+
+          // write back canonical video_thumbnail only if v.thumbnail looks like an image
+          if (v.thumbnail && isLikelyImage(v.thumbnail)) {
+            clone.video.video_thumbnail = v.thumbnail;
+          } else {
+            // if no valid thumbnail on clip, keep whatever existing clone.video.video_thumbnail is (do not delete)
+          }
+        }
+
+        // copy top-level audio duration if a matching top-level audio clip exists
+        if (clone.audio && clone.audio.audio_url) {
+          const audioUrl = clone.audio.audio_url;
+          const fileNameFromUrl = audioUrl ? audioUrl.split("/").pop() : null;
+
+          const match =
+            (audioUrl && topLevelAudioByUrl.get(audioUrl)) ||
+            (fileNameFromUrl && topLevelAudioByFile.get(fileNameFromUrl)) ||
+            null;
+
+          if (
+            match &&
+            typeof match.duration === "number" &&
+            isFinite(match.duration)
+          ) {
+            clone.audio.duration = Number(match.duration.toFixed(2));
+          } else {
+            // leave clone.audio.duration unchanged if it existed; do not overwrite with visual length
+          }
+        }
+
+        if (typeof clone.slide_number !== "undefined")
+          clone.slide_number = idx + 1;
+        return clone;
+      }
+
+      // fallback slide
+      return {
+        uuid: v.id,
+        slide_number: idx + 1,
+        ...(v.type === "image"
+          ? { image: { image_url: v.url, image_duration: visibleLenRounded } }
+          : {}),
+        ...(v.type === "video"
+          ? {
+              video: {
+                video_url: v.url,
+                video_duration: visibleLenRounded,
+                video_thumbnail: isLikelyImage(v.thumbnail)
+                  ? v.thumbnail
+                  : null,
+              },
+            }
+          : {}),
+        audio: undefined,
+      };
+    });
+
+    // 3) build final JSON shape and set to memory
+    const original =
+      Array.isArray(ClipsData) && ClipsData.length ? ClipsData[0] : null;
+    let newJson;
+    if (
+      original &&
+      typeof original === "object" &&
+      Array.isArray(original.slides)
+    ) {
+      newJson = [{ ...deepClone(original), slides: newSlides }];
+    } else {
+      newJson = [{ slides: newSlides }];
+    }
+
+    setExternalClipsJson(newJson);
+
+    // debug
+    // console.log(
+    //   "Synced ClipsData -> new slides (video thumbnails + durations):",
+    //   newSlides.map((s) => ({
+    //     id: s.uuid || s.image?.image_url || s.video?.video_url,
+    //     image_duration: s.image?.image_duration,
+    //     video_duration: s.video?.video_duration,
+    //     audio_duration: s.audio?.duration,
+    //     video_thumbnail: s.video?.video_thumbnail,
+    //   }))
+    // );
+
+    // attempt to save server-side (optional)
+    try {
+      await fetch("/api/save-clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clips: newJson }),
+      });
+      console.log("Saved updated ClipsData to server output.js");
+    } catch (err) {
+      console.warn("Failed to save ClipsData to server:", err);
+    }
+  }, []);
 
   const handleClipEnd = useCallback(
     (endedClipId) => {
@@ -302,7 +525,8 @@ export default function Home() {
     });
   };
 
-  const fixAudioTrackLayers = (clipsArr) => {
+  // replace the const version with this hoisted function so it's available earlier
+  function fixAudioTrackLayers(clipsArr) {
     const audioClips = clipsArr.filter((c) => c.type === "audio");
     const sorted = [...audioClips].sort((a, b) => a.startTime - b.startTime);
     const layers = [];
@@ -328,17 +552,35 @@ export default function Home() {
       const match = layered.find((a) => a.id === c.id);
       return match ? { ...c, track: match.track } : c;
     });
-  };
+  }
 
-  const handleAutoLayerFix = (updatedClips) => {
-    const fixed = fixAudioTrackLayers(updatedClips);
-    setClips(fixed);
-  };
+  // New handleAutoLayerFix: apply audio layering, set clips, and sync the new visual order
+  const handleAutoLayerFix = useCallback(
+    (updatedClips) => {
+      const fixed = fixAudioTrackLayers(updatedClips);
+      setClips(fixed);
 
+      // Sync to ClipsData (use microtask so clipsRef.current is up-to-date)
+      setTimeout(() => {
+        // if you prefer to use the fixed value directly, pass fixed instead of clipsRef.current
+        syncClipsToClipsData(clipsRef.current || fixed);
+      }, 0);
+    },
+    [
+      /* no deps necessary (fixAudioTrackLayers and syncClipsToClipsData are stable) */
+    ]
+  );
+
+  // --------------------------
+  // IMPORTANT: UPDATED handler to support trimming effects
+  // --------------------------
   const handleClipUpdate = (clipId, updates) => {
     setClips((prev) => {
       const target = prev.find((c) => c.id === clipId);
-      const updated = prev.map((c) =>
+      if (!target) return prev;
+
+      // merge simple updates first
+      let updated = prev.map((c) =>
         c.id === clipId ? { ...c, ...updates } : c
       );
 
@@ -350,8 +592,66 @@ export default function Home() {
       const isVisual =
         target && (target.type === "video" || target.type === "image");
 
-      return affectsTimeline && isVisual ? autoReflowClips(updated) : updated;
+      if (isVisual && affectsTimeline) {
+        // read old trim values from the original target
+        const oldTrimStart = Number(target.trimStart || 0);
+        const oldTrimEnd = Number(target.trimEnd || 0);
+
+        // pick new trim values (may not be provided in updates)
+        const newClip = updated.find((c) => c.id === clipId);
+        const newTrimStart =
+          updates.trimStart !== undefined
+            ? Number(updates.trimStart || 0)
+            : oldTrimStart;
+        const newTrimEnd =
+          updates.trimEnd !== undefined
+            ? Number(updates.trimEnd || 0)
+            : oldTrimEnd;
+
+        // compute visible length based on original media duration
+        const mediaDuration = Number(
+          newClip.duration || newClip.endTime - newClip.startTime || 0
+        );
+        const visibleLen = Math.max(
+          0.001,
+          mediaDuration - newTrimStart - newTrimEnd
+        );
+
+        // compute new startTime:
+        // if user supplied an explicit startTime in updates, honor it
+        // otherwise shift startTime forward by the left-trim delta (increase trimStart -> move right)
+        const deltaTrimStart = newTrimStart - oldTrimStart;
+        const newStartTime =
+          updates.startTime !== undefined
+            ? Number(updates.startTime)
+            : Number(target.startTime) + deltaTrimStart;
+
+        const newEndTime = newStartTime + visibleLen;
+
+        // apply the computed times and trims to the updated array
+        updated = updated.map((c) =>
+          c.id === clipId
+            ? {
+                ...c,
+                trimStart: newTrimStart,
+                trimEnd: newTrimEnd,
+                startTime: newStartTime,
+                endTime: newEndTime,
+              }
+            : c
+        );
+
+        // Auto-reflow visual clips so downstream clips shift to accommodate new length
+        updated = autoReflowClips(updated);
+      }
+
+      return updated;
     });
+
+    // Immediately sync to ClipsData JSON (use microtask so clipsRef is updated)
+    setTimeout(() => {
+      syncClipsToClipsData(clipsRef.current);
+    }, 0);
   };
 
   const handleClipSelect = (clip) => {
@@ -704,181 +1004,356 @@ export default function Home() {
   // - REPLACES current clips so default-clip does not show when external data exists
   // -----------------------
 
-  const getRemoteAudioDuration = (url, fallback = null) =>
+  // Robust universal media duration probe that:
+  //  - tries without crossOrigin first (most servers)
+  //  - retries with crossOrigin only if needed
+  //  - attaches listeners before assigning src (safer)
+  const getRemoteMediaDuration = (
+    url,
+    type = "audio",
+    fallback = null,
+    opts = {}
+  ) =>
     new Promise((resolve) => {
       if (!url) return resolve(fallback);
-      try {
-        const a = new Audio();
-        a.src = url;
-        a.preload = "metadata";
+
+      const timeoutMs = opts.timeoutMs || 8000;
+      const maxAttempts = opts.retry ? opts.retry + 1 : 2; // try no-cors then cors
+      let attempt = 0;
+      let finished = false;
+
+      const tryOnce = (useCrossOrigin) => {
+        attempt++;
+        let timeoutId = null;
+        const el = document.createElement(type === "video" ? "video" : "audio");
+        el.preload = "metadata";
+
+        // Attach listeners BEFORE assigning src
+        const cleanup = () => {
+          el.removeEventListener("loadedmetadata", onMeta);
+          el.removeEventListener("error", onErr);
+          try {
+            el.src = "";
+          } catch {}
+          if (timeoutId) clearTimeout(timeoutId);
+        };
+
+        const finish = (dur) => {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          resolve(dur);
+        };
 
         const onMeta = () => {
           const d =
-            isFinite(a.duration) && a.duration > 0 ? a.duration : fallback;
-          cleanup();
-          resolve(d);
-        };
-        const onErr = () => {
-          cleanup();
-          resolve(fallback);
-        };
-        const cleanup = () => {
-          a.removeEventListener("loadedmetadata", onMeta);
-          a.removeEventListener("error", onErr);
-          try {
-            a.src = "";
-          } catch (e) {}
+            isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+          finish(d ?? fallback);
         };
 
-        a.addEventListener("loadedmetadata", onMeta);
-        a.addEventListener("error", onErr);
-
-        // safety timeout
-        setTimeout(() => {
+        const onErr = (ev) => {
+          // if error, try next attempt (e.g., switch crossOrigin)
           cleanup();
-          resolve(fallback);
-        }, 3000);
-      } catch (err) {
-        resolve(fallback);
-      }
+          if (attempt < maxAttempts) {
+            // small backoff
+            setTimeout(() => tryOnce(!useCrossOrigin), 150);
+            return;
+          }
+          finish(fallback);
+        };
+
+        el.addEventListener("loadedmetadata", onMeta);
+        el.addEventListener("error", onErr);
+
+        try {
+          if (useCrossOrigin) {
+            try {
+              el.crossOrigin = "anonymous";
+            } catch {}
+          } else {
+            // ensure nothing set
+            try {
+              el.removeAttribute("crossorigin");
+            } catch {}
+          }
+          // set src after listeners attached
+          el.src = url;
+        } catch (err) {
+          // failure -> try next if any
+          cleanup();
+          if (attempt < maxAttempts) {
+            setTimeout(() => tryOnce(!useCrossOrigin), 150);
+            return;
+          }
+          finish(fallback);
+        }
+
+        timeoutId = setTimeout(() => {
+          cleanup();
+          if (attempt < maxAttempts) {
+            // retry with opposite crossOrigin setting
+            setTimeout(() => tryOnce(!useCrossOrigin), 150);
+            return;
+          }
+          finish(fallback);
+        }, timeoutMs);
+      };
+
+      // start without crossOrigin first
+      tryOnce(false);
     });
+
+  // async function: builds clips array from ClipsData and replaces app clips state
+  const buildAndReplaceClipsFromClipsData = async () => {
+    if (!ClipsData) return;
+
+    // Find slides array (support both shapes)
+    const dataEntry =
+      Array.isArray(ClipsData) && ClipsData.length
+        ? ClipsData.find((d) => Array.isArray(d.slides)) || ClipsData[0]
+        : ClipsData;
+    if (!dataEntry) return;
+
+    const slides = Array.isArray(dataEntry.slides)
+      ? dataEntry.slides
+      : Array.isArray(ClipsData) &&
+        ClipsData.every(
+          (s) =>
+            s && (s.image || s.image_url || s.url || s.video_url || s.video)
+        )
+      ? ClipsData
+      : null;
+    if (!slides || !slides.length) return;
+
+    // Helper: deep clone
+    const deepClone = (o) => {
+      try {
+        return typeof structuredClone === "function"
+          ? structuredClone(o)
+          : JSON.parse(JSON.stringify(o));
+      } catch {
+        return JSON.parse(JSON.stringify(o));
+      }
+    };
+
+    // Pre-read audio durations in parallel (best-effort)
+    const audioDurationPromises = slides.map((s, idx) => {
+      const audioUrl = s?.audio?.audio_url || s?.audio_url || null;
+      const slideAudioDuration = s?.audio?.duration ?? null;
+      if (!audioUrl)
+        return Promise.resolve(
+          slideAudioDuration != null ? Number(slideAudioDuration) : null
+        );
+
+      // getRemoteMediaDuration should exist in your file (robust helper recommended)
+      return getRemoteMediaDuration(
+        audioUrl,
+        "audio",
+        slideAudioDuration || 3,
+        {
+          timeoutMs: 8000,
+          tryCrossOrigin: true,
+        }
+      )
+        .then((d) => {
+          if (d == null)
+            return slideAudioDuration != null ? Number(slideAudioDuration) : 3;
+          return d;
+        })
+        .catch(() =>
+          slideAudioDuration != null ? Number(slideAudioDuration) : 3
+        );
+    });
+
+    // Pre-read video durations in parallel (if needed)
+    const videoDurationPromises = slides.map((s) => {
+      const videoUrl =
+        (s.video && (s.video.video_url || s.video.url)) ||
+        s.video_url ||
+        s.videoUrl ||
+        null;
+      const providedDuration =
+        Number(
+          s.duration ||
+            (s.video && (s.video.duration || s.video.video_duration)) ||
+            0
+        ) || 0;
+      if (!videoUrl) return Promise.resolve(null);
+      if (providedDuration > 0) return Promise.resolve(providedDuration);
+      return getRemoteMediaDuration(videoUrl, "video", null, {
+        timeoutMs: 10000,
+        tryCrossOrigin: true,
+      });
+    });
+
+    const [audioDurations, videoDurations] = await Promise.all([
+      Promise.all(audioDurationPromises),
+      Promise.all(videoDurationPromises),
+    ]);
+
+    // tiny helper to test whether a URL looks like an image
+    const isLikelyImage = (url) => {
+      if (!url || typeof url !== "string") return false;
+      if (url.startsWith("data:image/")) return true;
+      return /\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i.test(url);
+    };
+
+    // Build clips sequentially
+    const newClips = [];
+    let visualCursor = 0;
+
+    for (let i = 0; i < slides.length; i++) {
+      const slide = slides[i];
+      const imageObj = slide.image || {};
+      const audioObj = slide.audio || {};
+      const videoObj = slide.video || {};
+
+      const videoUrl =
+        videoObj.video_url ||
+        videoObj.url ||
+        slide.video_url ||
+        slide.videoUrl ||
+        null;
+
+      const imageUrl =
+        imageObj.image_url ||
+        slide.image_url ||
+        slide.imageUrl ||
+        slide.url ||
+        null;
+
+      const isVideo = !!videoUrl;
+
+      // Pick visual duration
+      let visualDuration = 0;
+      if (isVideo) {
+        visualDuration =
+          Number(videoObj.duration || videoObj.video_duration) ||
+          Number(videoDurations[i]) ||
+          3;
+      } else {
+        visualDuration =
+          Number(
+            imageObj.duration || imageObj.image_duration || slide.duration
+          ) || 3;
+      }
+
+      const visualId =
+        slide.uuid ||
+        `visual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const visualStart = visualCursor;
+      const visualEnd = visualStart + visualDuration;
+
+      // Choose thumbnail:
+      // - For videos: prefer slide.video_thumbnail (your canonical field)
+      // - For images: use the image url (you said you don't send separate thumbnails for images)
+      let chosenThumbnail = null;
+      if (isVideo) {
+        chosenThumbnail =
+          (slide.video &&
+            (slide.video.video_thumbnail || slide.video.Video_thumbnail)) ||
+          slide.video_thumbnail ||
+          // optional older fallback if present:
+          slide.thumbnail ||
+          videoObj.thumbnail ||
+          null;
+
+        // Validate: if the chosen value is obviously not an image (e.g. an mp3 link),
+        // we don't set a thumbnail (UI will show Loading... fallback).
+        if (!isLikelyImage(chosenThumbnail)) {
+          chosenThumbnail = null;
+        }
+      } else {
+        chosenThumbnail = imageUrl || null; // image itself is the thumbnail
+      }
+
+      // Build clip
+      const visualClip = {
+        id: visualId,
+        type: isVideo ? "video" : "image",
+        url: isVideo ? videoUrl || "" : imageUrl || "",
+        fileName: isVideo
+          ? (videoUrl || "").split("/").pop()
+          : imageUrl
+          ? imageUrl.split("/").pop()
+          : `image-${visualId}`,
+        mimeType: isVideo
+          ? videoObj.mimeType || "video/mp4"
+          : imageUrl?.endsWith(".png")
+          ? "image/png"
+          : "image/jpeg",
+        duration: visualDuration,
+        startTime: visualStart,
+        endTime: visualEnd,
+        trimStart: 0,
+        trimEnd: 0,
+        hasAudio: !!(audioObj && audioObj.audio_url) || !!isVideo,
+        thumbnail: chosenThumbnail,
+        track: 0,
+        _rawSlide: deepClone(slide),
+      };
+
+      newClips.push(visualClip);
+
+      // Attach independent audio clip if slide provides audio_url
+      if (audioObj && audioObj.audio_url) {
+        const audioDur =
+          audioDurations &&
+          typeof audioDurations[i] !== "undefined" &&
+          audioDurations[i] != null
+            ? audioDurations[i]
+            : Number(audioObj.duration) || 3;
+
+        const audioClip = {
+          id: `${audioObj.uuid || visualId}-audio`,
+          type: "audio",
+          url: audioObj.audio_url,
+          fileName: audioObj.audio_url.split("/").pop(),
+          mimeType: "audio/mpeg",
+          duration: audioDur,
+          startTime: visualStart,
+          endTime: visualStart + audioDur,
+          trimStart: 0,
+          trimEnd: 0,
+          hasAudio: true,
+          thumbnail: null,
+          track: 0,
+        };
+
+        newClips.push(audioClip);
+      }
+
+      visualCursor = visualEnd;
+    } // end for
+
+    if (!newClips.length) return;
+
+    // replace app clips state (assumes setClips + fixAudioTrackLayers exist in your file)
+    setClips(() => {
+      const marked = newClips.map((c) => ({ ...c, externalSource: true }));
+      return fixAudioTrackLayers(marked);
+    });
+
+    // ensure selection and totalDuration update after setClips
+    setTimeout(() => {
+      const allClipsNow = clipsRef.current;
+      const firstVisual = allClipsNow.find(
+        (c) => c.type === "image" || c.type === "video"
+      );
+      if (firstVisual) {
+        setSelectedClipId((prev) => prev || firstVisual.id);
+        const maxVisualEnd = Math.max(
+          ...allClipsNow
+            .filter((c) => c.type === "video" || c.type === "image")
+            .map((c) => c.endTime)
+        );
+        setTotalDuration((prev) => Math.max(prev, maxVisualEnd || 0));
+      }
+    }, 50);
+  };
 
   useEffect(() => {
     let cancelled = false;
-
-    const buildAndReplaceClipsFromClipsData = async () => {
-      if (!ClipsData) return;
-
-      // Determine slides array: support multiple shapes (array of entries with slides, or top-level slides)
-      const dataEntry =
-        Array.isArray(ClipsData) && ClipsData.length
-          ? ClipsData.find((d) => Array.isArray(d.slides)) || ClipsData[0]
-          : ClipsData;
-      if (!dataEntry) return;
-
-      const slides = Array.isArray(dataEntry.slides)
-        ? dataEntry.slides
-        : Array.isArray(ClipsData) &&
-          ClipsData.every((s) => s && (s.image || s.image_url || s.url))
-        ? ClipsData
-        : null;
-      if (!slides || !slides.length) return;
-
-      // Fetch audio durations in parallel (with fallback)
-      const audioDurationPromises = slides.map((s) =>
-        s?.audio?.audio_url
-          ? getRemoteAudioDuration(s.audio.audio_url, Number(s?.duration) || 3)
-          : Promise.resolve(null)
-      );
-
-      const audioDurations = await Promise.all(audioDurationPromises);
-
-      // Build newClips, laid out sequentially from start=0
-      const newClips = [];
-      let visualCursor = 0;
-
-      for (let i = 0; i < slides.length; i++) {
-        const slide = slides[i];
-        const imageObj = slide.image || {};
-        const audioObj = slide.audio || {};
-
-        // support alternate shapes
-        const imageUrl =
-          imageObj.image_url || slide.image_url || slide.imageUrl || null;
-        const videoUrl =
-          imageObj.video_url || slide.video_url || slide.videoUrl || null;
-
-        // prefer explicit per-slide duration, fallback to imageObj.duration or slide.duration or 3
-        const visualDuration = Number(imageObj.duration || slide.duration) || 3;
-
-        const visualId =
-          slide.uuid ||
-          `visual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const visualStart = visualCursor;
-        const visualEnd = visualStart + visualDuration;
-
-        // determine type + fields
-        const isVideo = Boolean(videoUrl);
-        const visualType = isVideo ? "video" : "image";
-        const visualSrc = isVideo ? videoUrl : imageUrl;
-        const fileName = visualSrc
-          ? visualSrc.split("/").pop()
-          : `${visualType}-${visualId}`;
-        const mimeType = isVideo
-          ? "video/mp4"
-          : visualSrc?.endsWith(".png")
-          ? "image/png"
-          : "image/jpeg";
-
-        const visualClip = {
-          id: visualId,
-          type: visualType,
-          url: visualSrc || "",
-          fileName,
-          mimeType,
-          duration: visualDuration,
-          startTime: visualStart,
-          endTime: visualEnd,
-          trimStart: 0,
-          trimEnd: 0,
-          hasAudio: !!(audioObj && audioObj.audio_url),
-          // thumbnail: keep imageUrl for images; for videos we could extract thumbnails later
-          thumbnail: isVideo ? null : imageUrl || null,
-          track: 0,
-        };
-        newClips.push(visualClip);
-
-        // attach audio clip if present
-        if (audioObj && audioObj.audio_url) {
-          const audioDur = audioDurations[i] || visualDuration;
-          const audioClip = {
-            id: `${audioObj.uuid || visualId}-audio`,
-            type: "audio",
-            url: audioObj.audio_url,
-            fileName: audioObj.audio_url.split("/").pop(),
-            mimeType: "audio/mpeg",
-            duration: audioDur,
-            startTime: visualStart,
-            endTime: visualStart + audioDur,
-            trimStart: 0,
-            trimEnd: 0,
-            hasAudio: true,
-            thumbnail: null,
-            track: 0, // will be fixed by fixAudioTrackLayers
-          };
-          newClips.push(audioClip);
-        }
-
-        visualCursor = visualEnd;
-      }
-
-      if (cancelled) return;
-      if (!newClips.length) return;
-
-      // REPLACE existing clips entirely with generated clips (no default-clip)
-      setClips(() => {
-        const marked = newClips.map((c) => ({ ...c, externalSource: true }));
-        return fixAudioTrackLayers(marked);
-      });
-
-      // ensure selection and total duration update
-      setTimeout(() => {
-        const allClipsNow = clipsRef.current;
-        const firstVisual = allClipsNow.find(
-          (c) => c.type === "image" || c.type === "video"
-        );
-        if (firstVisual) {
-          setSelectedClipId((prev) => prev || firstVisual.id);
-          const maxVisualEnd = Math.max(
-            ...allClipsNow
-              .filter((c) => c.type === "video" || c.type === "image")
-              .map((c) => c.endTime)
-          );
-          setTotalDuration((prev) => Math.max(prev, maxVisualEnd || 0));
-        }
-      }, 50);
-    };
-
     // Run the builder once on mount
     buildAndReplaceClipsFromClipsData();
 
@@ -926,6 +1401,7 @@ export default function Home() {
             onSeek={handleSeek}
             selectedClipId={selectedClipId}
             onAutoLayerFix={handleAutoLayerFix}
+            onCommitMove={commitMoveAndSync}
           />
         </div>
 
