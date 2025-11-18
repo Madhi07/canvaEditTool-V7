@@ -23,6 +23,7 @@ export default function Timeline({
   selectedClipId = null,
   onAutoLayerFix = () => {},
   onSplitAudio = () => {},
+  onSplitClip = () => {},
 }) {
   const timelineRef = useRef(null);
   const timeMarkersRef = useRef(null);
@@ -775,14 +776,26 @@ export default function Timeline({
                 }}
                 onMouseDown={(e) => handleClipMouseDown(e, clip, "move")}
                 onContextMenu={(e) => {
-                  if (clip.type === "audio") {
-                    e.preventDefault();
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const clickX = e.clientX - rect.left;
-                    const splitRatio = clickX / rect.width;
-                    const splitTime =
-                      clip.startTime +
-                      (clip.endTime - clip.startTime) * splitRatio;
+                  e.preventDefault();
+                  // compute click position relative to clip to determine split time
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const clickX = e.clientX - rect.left;
+                  const splitRatio = Math.max(
+                    0,
+                    Math.min(1, clickX / rect.width)
+                  );
+                  const clipVisibleLen =
+                    (clip.duration || clip.endTime - clip.startTime || 0) -
+                    (clip.trimStart || 0) -
+                    (clip.trimEnd || 0);
+                  const splitTime =
+                    clip.startTime + clipVisibleLen * splitRatio;
+
+                  // call the new handler (prop name: onSplitClip)
+                  if (typeof onSplitClip === "function") {
+                    onSplitClip(clip.id, splitTime);
+                  } else if (typeof onSplitAudio === "function") {
+                    // backward-compat fallback if you still use old prop name
                     onSplitAudio(clip.id, splitTime);
                   }
                 }}

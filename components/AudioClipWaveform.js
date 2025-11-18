@@ -1,24 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-// Single AudioContext instance to prevent conflicts
-let globalAudioContext = null;
-let audioContextPromise = null;
-
-function getAudioContext() {
-  if (!globalAudioContext) {
-    audioContextPromise = new Promise((resolve, reject) => {
-      try {
-        globalAudioContext = new (window.AudioContext || window.webkitAudioContext)();
-        resolve(globalAudioContext);
-      } catch (error) {
-        console.error("Failed to create AudioContext:", error);
-        reject(error);
-      }
-    });
-  }
-  return audioContextPromise;
-}
-
 // Cache decoded buffers by URL
 const bufferCache = new Map();
 
@@ -68,6 +49,83 @@ async function fetchAudioArrayBufferWithFallback(audioUrl) {
 }
 
 /* -------------------------
+   Decoder: OfflineAudioContext-first with fallbacks
+   ------------------------- */
+async function decodeAudioBufferOffline(arrayBuffer) {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+
+  // Prefer OfflineAudioContext (does not need user gesture)
+  if (OfflineCtx) {
+    try {
+      // Determine sampleRate: try to read from a short-lived AudioContext if available
+      let sampleRate = 44100;
+      if (AudioCtx) {
+        try {
+          const tmp = new AudioCtx();
+          sampleRate = tmp.sampleRate || sampleRate;
+          if (tmp.close) await tmp.close();
+        } catch (e) {
+          // ignore; fallback to default sampleRate
+        }
+      }
+
+      // Create an offline context with an estimated length (1 frame). Some browsers support decodeAudioData on OfflineAudioContext.
+      const offline = new OfflineCtx(1, 1, sampleRate);
+
+      // Try decode on offline context (some browsers allow this)
+      if (typeof offline.decodeAudioData === "function") {
+        const decoded = await new Promise((resolve, reject) => {
+          try {
+            offline.decodeAudioData(
+              arrayBuffer.slice(0),
+              (res) => resolve(res),
+              (err) => reject(err)
+            );
+          } catch (err) {
+            reject(err);
+          }
+        });
+        return decoded;
+      }
+    } catch (err) {
+      console.warn("OfflineAudioContext decode failed, falling back to AudioContext:", err);
+      // fallthrough to AudioContext fallback
+    }
+  }
+
+  // Fallback: use temporary AudioContext decodeAudioData (may show user-gesture warning if used for playback, but decoding here is short-lived)
+  if (AudioCtx) {
+    try {
+      const ac = new AudioCtx();
+      const audioBuffer = await new Promise((resolve, reject) => {
+        try {
+          const maybePromise = ac.decodeAudioData(arrayBuffer.slice(0));
+          if (maybePromise && typeof maybePromise.then === "function") {
+            maybePromise.then(resolve).catch(reject);
+          } else {
+            ac.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+      try {
+        if (ac.close) await ac.close();
+      } catch (e) {
+        // ignore
+      }
+      return audioBuffer;
+    } catch (err) {
+      console.error("AudioContext decode fallback failed:", err);
+      throw err;
+    }
+  }
+
+  throw new Error("No AudioContext available for decoding");
+}
+
+/* -------------------------
    Component
    ------------------------- */
 export default function AudioClipWaveform({
@@ -78,12 +136,11 @@ export default function AudioClipWaveform({
   isSelected = false,
   width = 400,
   height = 50,
-  // NEW: trims in seconds
+  // trims in seconds
   trimStart = 0,
   trimEnd = 0,
 }) {
   const canvasRef = useRef(null);
-  const audioCtxRef = useRef(null);
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -93,6 +150,8 @@ export default function AudioClipWaveform({
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
+    let mounted = true;
+
     async function renderWave() {
       setIsLoading(true);
       setError(null);
@@ -101,20 +160,7 @@ export default function AudioClipWaveform({
         // 1) Decode & cache buffer (by URL)
         let cached = bufferCache.get(audioUrl);
         if (!cached) {
-          const audioCtx = await getAudioContext();
-          audioCtxRef.current = audioCtx;
-
-          // if context is suspended, attempt to resume - may throw in some browsers if no user gesture
-          try {
-            if (audioCtx.state === "suspended") {
-              await audioCtx.resume();
-            }
-          } catch (resumeErr) {
-            // not fatal for waveform: continue and let fetch/decode handle gracefully
-            console.debug("AudioContext resume attempt:", resumeErr);
-          }
-
-          // Use robust fetch with fallback to avoid CORS crashes
+          // fetch arrayBuffer (with fallbacks)
           let buf;
           try {
             buf = await fetchAudioArrayBufferWithFallback(audioUrl);
@@ -122,24 +168,8 @@ export default function AudioClipWaveform({
             throw new Error(`Failed to fetch audio (all fallbacks): ${fetchErr.message || fetchErr}`);
           }
 
-          // decode
-          let decoded;
-          try {
-            decoded = await audioCtx.decodeAudioData(buf.slice(0));
-          } catch (decodeErr) {
-            // Some browsers may require decodeAudioData callback form; try fallback
-            decoded = await new Promise((resolve, reject) => {
-              try {
-                audioCtx.decodeAudioData(
-                  buf.slice(0),
-                  (res) => resolve(res),
-                  (err) => reject(err)
-                );
-              } catch (e) {
-                reject(e);
-              }
-            });
-          }
+          // decode using OfflineAudioContext-first helper (doesn't require user gesture)
+          const decoded = await decodeAudioBufferOffline(buf);
 
           const data = decoded.numberOfChannels > 0 ? decoded.getChannelData(0) : new Float32Array(0);
           const sampleRate = decoded.sampleRate;
@@ -155,10 +185,10 @@ export default function AudioClipWaveform({
           }
         }
 
-        const { data, sampleRate } = cached;
+        const { data, sampleRate, durationSec } = cached;
 
         // 2) Compute visible window in samples from trims
-        const d = Math.max(0, duration || cached.durationSec || 0);
+        const d = Math.max(0, duration || durationSec || 0);
         const safeTrimStart = Math.max(0, Math.min(Number(trimStart) || 0, d));
         const safeTrimEnd = Math.max(0, Math.min(Number(trimEnd) || 0, Math.max(0, d - safeTrimStart)));
 
@@ -176,7 +206,8 @@ export default function AudioClipWaveform({
 
         for (let i = 0; i < bins; i++) {
           const base = visibleStartSample + i * step;
-          let sum = 0, count = 0;
+          let sum = 0,
+            count = 0;
           for (let j = 0; j < step && base + j < visibleEndSample; j++) {
             sum += Math.abs(data[base + j] || 0);
             count++;
@@ -210,13 +241,13 @@ export default function AudioClipWaveform({
         // Progress overlay & line (expect progress normalized to trimmed width)
         if (progress > 0) {
           ctx.fillStyle = "rgba(255,255,255,0.2)";
-          ctx.fillRect(0, 0, width * progress, height);
+          ctx.fillRect(0, 0, width * Math.max(0, Math.min(1, progress)), height);
 
           ctx.strokeStyle = "rgba(255,255,255,0.8)";
           ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.moveTo(width * progress, 0);
-          ctx.lineTo(width * progress, height);
+          ctx.moveTo(width * Math.max(0, Math.min(1, progress)), 0);
+          ctx.lineTo(width * Math.max(0, Math.min(1, progress)), height);
           ctx.stroke();
         }
 
@@ -238,20 +269,17 @@ export default function AudioClipWaveform({
         ctx.textAlign = "center";
         ctx.fillText("Audio preview unavailable", width / 2, height / 2);
       } finally {
-        setIsLoading(false);
+        if (mounted) setIsLoading(false);
       }
     }
 
     renderWave();
+
+    return () => {
+      mounted = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioUrl, width, height, color, progress, isSelected, trimStart, trimEnd, duration]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      audioCtxRef.current = null;
-    };
-  }, []);
 
   if (error) {
     return (
@@ -275,12 +303,7 @@ export default function AudioClipWaveform({
       } ${isLoading ? "opacity-50" : "opacity-100"}`}
       style={{ width, height }}
     >
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={height}
-        className="w-full h-full"
-      />
+      <canvas ref={canvasRef} width={width} height={height} className="w-full h-full" />
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-75">
           <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>

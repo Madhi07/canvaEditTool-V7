@@ -485,43 +485,91 @@ export default function Home() {
     if (!selectedClipId) setSelectedClipId(newClip.id);
   };
 
-  const handleSplitAudio = (clipId, splitTime) => {
+  const handleSplitClip = (clipId, splitTime) => {
     setClips((prevClips) => {
       const updated = [...prevClips];
       const index = updated.findIndex((c) => c.id === clipId);
-      if (index === -1) return updated;
+      if (index === -1) return prevClips;
 
       const clip = updated[index];
 
-      if (
-        splitTime <= clip.startTime + 0.05 ||
-        splitTime >= clip.endTime - 0.05
-      )
-        return updated;
+      // Compute total visible length (accounting for trims)
+      const totalVisible =
+        (clip.duration || clip.endTime - clip.startTime || 0) -
+        (clip.trimStart || 0) -
+        (clip.trimEnd || 0);
 
-      const totalVisibleDuration =
-        clip.duration - clip.trimStart - clip.trimEnd;
-      const splitOffset = splitTime - clip.startTime;
-      const splitRelative = clip.trimStart + splitOffset;
+      // If there's no visible duration or split is near edges -> ignore
+      const REL_EPS = 0.05; // 50ms tolerance
+      const splitOffset = splitTime - clip.startTime; // seconds from clip start
+      if (totalVisible <= 0) return prevClips;
+      if (splitOffset <= REL_EPS || splitOffset >= totalVisible - REL_EPS)
+        return prevClips;
 
+      // Convert to absolute trim positions (relative to original clip.duration)
+      const splitRelative = (clip.trimStart || 0) + splitOffset;
+
+      // Build first and second parts
+      const nowTag = Date.now();
       const firstPart = {
         ...clip,
-        id: `${clip.id}-part1-${Date.now()}`,
+        id: `${clip.id}-part1-${nowTag}`,
+        // first part keeps original startTime, ends at splitTime
         endTime: splitTime,
-        trimStart: clip.trimStart,
-        trimEnd: clip.duration - splitRelative,
+        // trimStart unchanged, trimEnd adjusted so first part visible length is splitOffset
+        trimStart: clip.trimStart || 0,
+        trimEnd: Math.max(
+          0,
+          (clip.duration || clip.endTime - clip.startTime || 0) - splitRelative
+        ),
       };
 
       const secondPart = {
         ...clip,
-        id: `${clip.id}-part2-${Date.now()}`,
+        id: `${clip.id}-part2-${nowTag}`,
+        // second part starts at splitTime, ends at original end
         startTime: splitTime,
-        trimStart: splitRelative,
-        trimEnd: clip.trimEnd,
+        // trimStart becomes splitRelative (we start from the split)
+        trimStart: Math.max(0, splitRelative),
+        trimEnd: clip.trimEnd || 0,
       };
 
+      // Ensure firstPart.startTime exists and secondPart.endTime exists
+      firstPart.startTime = clip.startTime;
+      secondPart.endTime = clip.endTime;
+
+      // Replace the clip in array
       updated.splice(index, 1, firstPart, secondPart);
-      return updated;
+
+      // After splitting, we should fix audio layers or reflow visuals:
+      let final = updated;
+
+      if (clip.type === "audio") {
+        // recompute audio tracks to avoid collisions
+        final = fixAudioTrackLayers(final);
+      } else if (clip.type === "image" || clip.type === "video") {
+        // For visual clips, we likely want timeline to auto-reflow visuals sequentially.
+        // Call your existing autoReflowClips helper to rebuild visual order/timings.
+        if (typeof autoReflowClips === "function") {
+          final = autoReflowClips(final);
+        }
+      }
+
+      // Keep selection consistent: select first part
+      setSelectedClipId(firstPart.id);
+
+      // Update totalDuration if needed
+      const maxVisualEnd = Math.max(
+        ...final
+          .filter((c) => c.type === "video" || c.type === "image")
+          .map((c) => c.endTime)
+      );
+      if (isFinite(maxVisualEnd) && maxVisualEnd > 0) {
+        setTotalDuration((prev) => Math.max(prev, maxVisualEnd));
+      }
+
+      // Return new clips array
+      return final;
     });
   };
 
@@ -1393,7 +1441,8 @@ export default function Home() {
         <div className="p-4">
           <Timeline
             clips={clips}
-            onSplitAudio={handleSplitAudio}
+            onSplitClip={handleSplitClip}
+            onSplitAudio={handleSplitClip}
             currentTime={currentTime}
             totalDuration={totalDuration}
             onClipUpdate={handleClipUpdate}

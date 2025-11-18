@@ -6,8 +6,54 @@ export default ClipsData =[
     "status": "asset_generation_completed",
     "slides": [
       {
-        "uuid": "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
+        "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
         "slide_number": 1,
+        "subtitle": "Meet the Star",
+        "explain_text": "Here's our star: a playful dog. He's ready for his close-up.",
+        "image": {
+          "uuid": "430f7b28-54b3-4f67-94a3-d207232c0d45",
+          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
+          "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
+          "asset_type": "ai_generated",
+          "status": "success",
+          "image_duration": 1.49
+        },
+        "audio": {
+          "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
+          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/796cd29b-9221-43f4-8576-bb5661797960/audio/a9a6c19c-02ed-49a1-a821-8ed4c54de5ba.mp3",
+          "audio_prompt": "Meet our adorable star for today, a playful pup who's absolutely ready for his close-up moment.",
+          "status": "success",
+          "duration": 6.64
+        },
+        "image_id": "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
+        "audio_id": "796cd29b-9221-43f4-8576-bb5661797960"
+      },
+      {
+        "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
+        "slide_number": 2,
+        "subtitle": "Meet the Star",
+        "explain_text": "Here's our star: a playful dog. He's ready for his close-up.",
+        "image": {
+          "uuid": "430f7b28-54b3-4f67-94a3-d207232c0d45",
+          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
+          "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
+          "asset_type": "ai_generated",
+          "status": "success",
+          "image_duration": 4.51
+        },
+        "audio": {
+          "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
+          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/796cd29b-9221-43f4-8576-bb5661797960/audio/a9a6c19c-02ed-49a1-a821-8ed4c54de5ba.mp3",
+          "audio_prompt": "Meet our adorable star for today, a playful pup who's absolutely ready for his close-up moment.",
+          "status": "success",
+          "duration": 6.64
+        },
+        "image_id": "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
+        "audio_id": "796cd29b-9221-43f4-8576-bb5661797960"
+      },
+      {
+        "uuid": "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
+        "slide_number": 3,
         "subtitle": "Sunglasses On",
         "explain_text": "Time to accessorize! The dog wears cool sunglasses.",
         "image": {
@@ -29,31 +75,8 @@ export default ClipsData =[
         "audio_id": "29c7b149-d9a6-4257-9f96-4164c0938cdb"
       },
       {
-        "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
-        "slide_number": 2,
-        "subtitle": "Meet the Star",
-        "explain_text": "Here's our star: a playful dog. He's ready for his close-up.",
-        "image": {
-          "uuid": "430f7b28-54b3-4f67-94a3-d207232c0d45",
-          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
-          "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
-          "asset_type": "ai_generated",
-          "status": "success",
-          "image_duration": 6
-        },
-        "audio": {
-          "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
-          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/796cd29b-9221-43f4-8576-bb5661797960/audio/a9a6c19c-02ed-49a1-a821-8ed4c54de5ba.mp3",
-          "audio_prompt": "Meet our adorable star for today, a playful pup who's absolutely ready for his close-up moment.",
-          "status": "success",
-          "duration": 6.64
-        },
-        "image_id": "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
-        "audio_id": "796cd29b-9221-43f4-8576-bb5661797960"
-      },
-      {
         "uuid": "fb6a0dd2-ae62-4bf8-a200-040da423ec17",
-        "slide_number": 3,
+        "slide_number": 4,
         "subtitle": "Strike a Pose",
         "explain_text": "The dog strikes a pose. Snap that picture!",
         "video": {
@@ -76,7 +99,7 @@ export default ClipsData =[
       },
       {
         "uuid": "a7057bb7-5dfc-49d5-8c97-a72964dc035e",
-        "slide_number": 4,
+        "slide_number": 5,
         "subtitle": "Capture the Moment",
         "explain_text": "Capture this fun moment. A polaroid is taken.",
         "image": {
@@ -99,7 +122,7 @@ export default ClipsData =[
       },
       {
         "uuid": "b2c8b017-c81d-4bd7-a6e8-c60427a89750",
-        "slide_number": 5,
+        "slide_number": 6,
         "subtitle": "The Polaroid Shot",
         "explain_text": "Here's the polaroid! A perfect portrait.",
         "image": {
@@ -121,7 +144,7 @@ export default ClipsData =[
       },
       {
         "uuid": "23e02c30-fcc5-474b-a548-0d6f2f169acc",
-        "slide_number": 6,
+        "slide_number": 7,
         "subtitle": "Stylish Memories",
         "explain_text": "What a stylish memory! Share with friends.",
         "image": {

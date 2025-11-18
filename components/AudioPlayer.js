@@ -1,65 +1,205 @@
 // components/AudioPlayer.js
 import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
+import {
+  ensureAudioContextOnGesture,
+  getGlobalAudioContextIfExists,
+  resumeIfSuspended,
+} from "../utils/audio-helpers";
 
 /** Tunables */
 const FADE_SEC = 0.006; // 6ms clickless fade
 
-/** Single shared context + master */
+/** Single shared context + master (may be created lazily) */
 let AC = null;
 let MASTER = null;
 
-function getAC() {
-  if (!AC) {
-    AC = new (window.AudioContext || window.webkitAudioContext)();
-    MASTER = AC.createGain();
-    MASTER.gain.setValueAtTime(1, AC.currentTime);
-    MASTER.connect(AC.destination);
+/** Small in-memory cache for decoded AudioBuffers */
+const cache = new Map();
+
+/* -------------------------
+   Helpers: fetch with fallback (same logic you used before)
+   ------------------------- */
+function toS3ProxyPath(url) {
+  try {
+    const u = new URL(url);
+    return `/s3${u.pathname}${u.search || ""}`;
+  } catch (err) {
+    return null;
   }
+}
+
+async function fetchAudioArrayBufferWithFallback(audioUrl) {
+  // try direct fetch first
+  try {
+    const resp = await fetch(audioUrl, { mode: "cors" });
+    if (resp.ok) return await resp.arrayBuffer();
+  } catch (err) {
+    // likely CORS; fallthrough
+    console.debug("[Audio fetch] direct failed:", err);
+  }
+
+  // try a same-origin s3-style proxy path if available
+  const s3Path = toS3ProxyPath(audioUrl);
+  if (s3Path) {
+    try {
+      const resp = await fetch(s3Path);
+      if (resp.ok) return await resp.arrayBuffer();
+    } catch (err) {
+      console.debug("[Audio fetch] /s3 proxy failed:", err);
+    }
+  }
+
+  // finally server-side proxy route (you already had this)
+  try {
+    const proxyUrl = `/api/audio?url=${encodeURIComponent(audioUrl)}`;
+    const resp = await fetch(proxyUrl);
+    if (resp.ok) return await resp.arrayBuffer();
+    throw new Error(`Proxy fetch failed ${resp.status}`);
+  } catch (err) {
+    console.error("[Audio fetch] All attempts failed:", err);
+    throw err;
+  }
+}
+
+/* -------------------------
+   Decoder: OfflineAudioContext-first with fallback to temporary AudioContext
+   (decodes without creating/resuming the global playback AudioContext)
+   ------------------------- */
+async function decodeAudioBufferOffline(arrayBuffer) {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+
+  if (OfflineCtx) {
+    try {
+      // Determine sampleRate - try to obtain from a short-lived AudioContext (not the global one)
+      let sampleRate = 44100;
+      if (AudioCtx) {
+        try {
+          const tmp = new AudioCtx();
+          sampleRate = tmp.sampleRate || sampleRate;
+          if (tmp.close) await tmp.close();
+        } catch (e) {
+          // ignore; use default sampleRate
+        }
+      }
+
+      // create an OfflineAudioContext and try decodeAudioData on it
+      const offline = new OfflineCtx(1, 1, sampleRate);
+      if (typeof offline.decodeAudioData === "function") {
+        const decoded = await new Promise((resolve, reject) => {
+          try {
+            offline.decodeAudioData(arrayBuffer.slice(0), (res) => resolve(res), (err) => reject(err));
+          } catch (err) {
+            reject(err);
+          }
+        });
+        return decoded;
+      }
+    } catch (err) {
+      console.warn("OfflineAudioContext decode failed, falling back:", err);
+      // fall through to AudioContext decode
+    }
+  }
+
+  // fallback to a temporary AudioContext decode (closed after decode)
+  if (AudioCtx) {
+    try {
+      const ac = new AudioCtx();
+      const audioBuffer = await new Promise((resolve, reject) => {
+        try {
+          const maybePromise = ac.decodeAudioData(arrayBuffer.slice(0));
+          if (maybePromise && typeof maybePromise.then === "function") {
+            maybePromise.then(resolve).catch(reject);
+          } else {
+            ac.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+      try {
+        if (ac.close) await ac.close();
+      } catch (e) {
+        // ignore
+      }
+      return audioBuffer;
+    } catch (err) {
+      console.error("Temporary AudioContext decode failed:", err);
+      throw err;
+    }
+  }
+
+  throw new Error("No AudioContext available for decoding");
+}
+
+/* -------------------------
+   Lazy creation/resume helpers for the global playback AC
+   ------------------------- */
+function getExistingAC() {
+  // return local AC if already created, otherwise check helper's global
+  return AC || getGlobalAudioContextIfExists() || null;
+}
+
+async function createAudioContextIfNeeded() {
+  if (!AC) {
+    // try to reuse any context created by audio-helpers
+    AC = getGlobalAudioContextIfExists() || null;
+  }
+  if (!AC) {
+    // ensureAudioContextOnGesture will either create on first gesture or create immediately if gesture already happened
+    try {
+      AC = await ensureAudioContextOnGesture();
+    } catch (e) {
+      console.warn("ensureAudioContextOnGesture failed:", e);
+    }
+  }
+
+  // If it still doesn't exist and creation failed, try to construct (last-resort)
+  if (!AC && (window.AudioContext || window.webkitAudioContext)) {
+    try {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      AC = new Ctor();
+    } catch (e) {
+      console.error("Fallback AC creation failed:", e);
+    }
+  }
+
+  if (AC && !MASTER) {
+    try {
+      MASTER = AC._master || AC.createGain();
+      MASTER.gain.setValueAtTime(MASTER.gain?.value ?? 1, AC.currentTime);
+      MASTER.connect(AC.destination);
+      AC._master = MASTER;
+    } catch (e) {
+      console.warn("Master gain setup failed:", e);
+    }
+  } else if (AC && AC._master) {
+    MASTER = AC._master;
+  }
+
   return AC;
 }
 
-/** Buffer cache: url -> Promise<AudioBuffer> */
-const cache = new Map();
+/* -------------------------
+   Buffer getter: fetch + decode (without creating global AC)
+   ------------------------- */
 async function getBuffer(url) {
-  // If already cached, return it
   if (cache.has(url)) return cache.get(url);
 
-  const ac = getAC();
+  // fetch arrayBuffer (falls back like before)
+  const p = (async () => {
+    const arrayBuffer = await fetchAudioArrayBufferWithFallback(url);
+    const decoded = await decodeAudioBufferOffline(arrayBuffer);
+    return decoded;
+  })();
 
-  // Fetch audio data via your Next.js API
-  const response = await fetch(`/api/audio?url=${encodeURIComponent(url)}`);
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch audio: ${response.status}`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-
-  // Decode the audio data using AudioContext
-  const decoded = await new Promise((resolve, reject) => {
-    ac.decodeAudioData(arrayBuffer, resolve, reject);
-  });
-
-  cache.set(url, decoded); // cache it
-  return decoded;
+  cache.set(url, p);
+  return p;
 }
-//  function getBuffer(url) {
-//   if (cache.has(url)) return cache.get(url);
-//   const ac = getAC();
-//   fetch(`/api/audio?url=${encodeURIComponent(url)}`)
-//     // const p = fetch(url)
-//     const arrayBuffer = await response.arrayBuffer();
-//     .then((r) => r.arrayBuffer())
-//     .then(
-//       (ab) =>
-//         new Promise((res, rej) => {
-//           ac.decodeAudioData(ab, res, rej);
-//         })
-//     );
-//   cache.set(url, p);
-//   return p;
-// }
 
+/* -------------------------
+   Utility functions (unchanged)
+   ------------------------- */
 function visLen(c) {
   const d = Math.max(0, Number(c.duration) || 0);
   const ts = Math.max(0, Number(c.trimStart) || 0);
@@ -94,41 +234,27 @@ function stopClip(id, fast = false) {
   const e = active.get(id);
   if (!e) return;
   try {
-    // cancel any pending cleanup timer
     if (e.teardownTimerId != null) {
       clearTimeout(e.teardownTimerId);
       e.teardownTimerId = null;
     }
-
-    // remove onended handler to avoid double-cleanup races
     try {
       if (e.onendedHandler && e.source) {
         e.source.onended = null;
       }
     } catch {}
-
-    // cancel scheduled gain ramps at once, then stop
     try {
-      const now = AC.currentTime;
+      const now = (AC && AC.currentTime) || 0;
       e.gain.gain.cancelScheduledValues(now);
       e.gain.gain.setValueAtTime(0.0001, now);
     } catch {}
-
     try {
       e.source.stop(0);
-    } catch (err) {
-      // ignore if already stopped/ended
-    }
-
-    // disconnect nodes
-    try {
-      e.source.disconnect();
-    } catch {}
-    try {
-      e.gain.disconnect();
-    } catch {}
+    } catch (err) {}
+    try { e.source.disconnect(); } catch {}
+    try { e.gain.disconnect(); } catch {}
   } catch (err) {
-    // swallow errors — we still want to remove the entry
+    // swallow
   }
   active.delete(id);
 }
@@ -140,31 +266,32 @@ function stopAll() {
   }
 }
 
-/** Create and schedule a single continuous BufferSource for a clip */
-function startClip(
-  ac,
-  clip,
-  timelineNow,
-  masterVol,
-  sessionAtStart,
-  isPlayingRef,
-  sessionRef
-) {
+/* -------------------------
+   Create and schedule a single BufferSource for a clip
+   This was startClip — now it ensures AC exists when needed.
+   ------------------------- */
+function startClip(clip, timelineNow, masterVol, sessionAtStart, isPlayingRef, sessionRef) {
   if (active.has(clip.id)) return;
 
   const startTL = Math.max(timelineNow, clip.startTime);
   const endTL = clipEnd(clip);
   if (endTL <= startTL) return;
 
+  // getBuffer will decode without creating the global AC
   return getBuffer(clip.url)
-    .then((buffer) => {
-      // Guard: if session changed or we are no longer playing, bail out
-      if (
-        !buffer ||
-        !isPlayingRef.current ||
-        sessionRef.current !== sessionAtStart
-      )
-        return;
+    .then(async (buffer) => {
+      // safety guards
+      if (!buffer || !isPlayingRef.current || sessionRef.current !== sessionAtStart) return;
+
+      // ensure there is a real playback AudioContext before scheduling
+      const ac = await createAudioContextIfNeeded();
+      if (!ac) return;
+
+      // if resume is needed (suspended), try to resume
+      await resumeIfSuspended(ac);
+
+      // Re-check guards after decode/context creation
+      if (!isPlayingRef.current || sessionRef.current !== sessionAtStart) return;
 
       const when = ac.currentTime + (startTL - timelineNow);
       const offset = bufferOffsetFor(clip, startTL);
@@ -177,56 +304,54 @@ function startClip(
       const g = ac.createGain();
 
       const perClip = clip.gain != null ? clip.gain : 1;
-      const targetGain =
-        Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
+      const targetGain = Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
 
-      // Final guard just before scheduling (race between decode and user actions)
+      // Final guard
       if (!isPlayingRef.current || sessionRef.current !== sessionAtStart) {
-        try {
-          src.disconnect();
-          g.disconnect();
-        } catch {}
+        try { src.disconnect(); } catch {}
+        try { g.disconnect(); } catch {}
         return;
       }
 
       // ramp/gain setup
-      g.gain.setValueAtTime(0.0001, when);
+      try {
+        g.gain.setValueAtTime(0.0001, when);
+      } catch (e) {
+        // some browsers throw if scheduling too far in past; safe guard
+      }
       fade(g, when, 0.0001, targetGain, FADE_SEC);
 
-      src.connect(g).connect(MASTER);
+      // connect nodes to master
+      try {
+        src.connect(g).connect(MASTER || ac.destination);
+      } catch (e) {
+        // if MASTER not set, connect to destination
+        try { src.connect(ac.destination); } catch {}
+      }
 
       try {
         src.start(when, offset, dur);
       } catch (err) {
-        try {
-          src.disconnect();
-        } catch {}
-        try {
-          g.disconnect();
-        } catch {}
+        try { src.disconnect(); } catch {}
+        try { g.disconnect(); } catch {}
         return;
       }
 
-      // schedule fade-out at end
+      // schedule fade-out
       const outStart = when + dur - FADE_SEC;
       if (outStart > ac.currentTime) {
         fade(g, outStart, targetGain, 0.0001, FADE_SEC);
       }
 
-      // define onended handler for extra safety
+      // onended handler
       const onendedHandler = () => {
         if (active.has(clip.id)) {
-          try {
-            src.onended = null;
-          } catch {}
+          try { src.onended = null; } catch {}
           active.delete(clip.id);
         }
       };
-      try {
-        src.onended = onendedHandler;
-      } catch {}
+      try { src.onended = onendedHandler; } catch {}
 
-      // track entry and a teardown timer that removes the entry after it's done
       const endsAtCtx = when + dur;
       const entry = {
         source: src,
@@ -246,20 +371,14 @@ function startClip(
       };
       active.set(clip.id, entry);
 
-      // cleanup timer (ensures we delete entry even if onended doesn't fire)
+      // cleanup timer
       const teardown = () => {
         const cur = active.get(clip.id);
         if (!cur) return;
-        if (AC.currentTime >= endsAtCtx - 0.01) {
-          try {
-            cur.source.onended = null;
-          } catch {}
-          try {
-            cur.source.disconnect();
-          } catch {}
-          try {
-            cur.gain.disconnect();
-          } catch {}
+        if ((AC && AC.currentTime) >= endsAtCtx - 0.01) {
+          try { cur.source.onended = null; } catch {}
+          try { cur.source.disconnect(); } catch {}
+          try { cur.gain.disconnect(); } catch {}
           active.delete(clip.id);
         } else {
           entry.teardownTimerId = setTimeout(teardown, 50);
@@ -267,20 +386,23 @@ function startClip(
       };
       entry.teardownTimerId = setTimeout(teardown, (dur + 0.1) * 1000);
     })
-    .catch(() => {
-      // decode failed — nada
+    .catch((err) => {
+      // decode failed or fetch failed — ignore as before
+      console.warn("startClip error:", err);
     });
 }
 
-/** The React component */
+/* -------------------------
+   Component
+   ------------------------- */
 const AudioPlayer = forwardRef(function AudioPlayer(
   {
     activeAudioClips,
     isPlaying,
     currentTime,
     seekAudio,
-    clips, // now used for prefetch
-    activeVisualType, // used to tune scheduling behavior
+    clips,
+    activeVisualType,
     masterVolume = 1,
   },
   ref
@@ -299,49 +421,80 @@ const AudioPlayer = forwardRef(function AudioPlayer(
         sessionRef.current += 1;
         stopAll();
       },
-      setMasterVolume(v) {
+      async setMasterVolume(v) {
         masterVolRef.current = Math.max(0, Math.min(1, v));
-        const ac = getAC();
-        MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+        const existingAC = getExistingAC();
+        if (existingAC && MASTER) {
+          try {
+            MASTER.gain.setValueAtTime(masterVolRef.current, existingAC.currentTime);
+          } catch (e) {
+            // ignore
+          }
+        }
       },
     }),
     []
   );
 
-  // Prefetch audio buffers for all audio clips when `clips` changes.
-  // This reduces decode latency and the race window where late decodes can start unexpectedly.
+  // Prefetch audio buffers (decode offline) when `clips` change.
   useEffect(() => {
     if (!clips || !Array.isArray(clips)) return;
     for (const c of clips) {
       if (c.type === "audio" && c.url) {
-        // fire-and-forget: cache.getBuffer will dedupe
-        getBuffer(c.url).catch(() => {
-          /* ignore decode errors here */
-        });
+        // getBuffer will dedupe and decode without creating the playback AC
+        getBuffer(c.url).catch(() => {});
       }
     }
   }, [clips]);
 
-  // master volume sync
+  // master volume sync (do not forcibly create AC here; only if it exists)
   useEffect(() => {
     masterVolRef.current = Math.max(0, Math.min(1, masterVolume));
-    const ac = getAC();
-    MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+    const existingAC = getExistingAC();
+    if (existingAC && MASTER) {
+      try {
+        MASTER.gain.setValueAtTime(masterVolRef.current, existingAC.currentTime);
+      } catch (e) {}
+    }
   }, [masterVolume]);
 
-  // play/pause gate — suspend context & increment session on pause
+  // play/pause behavior: when transitioning to play, ensure AC exists and resume it.
   useEffect(() => {
-    const ac = getAC();
     isPlayingRef.current = isPlaying;
-    sessionRef.current += 1; // invalidate decodes started earlier
+    sessionRef.current += 1; // invalidate previous decodes/schedules
 
     if (isPlaying) {
-      ac.resume?.();
+      // create/resume context on play (lazy & gesture-protected by audio-helpers)
+      createAudioContextIfNeeded()
+        .then((ac) => {
+          if (!ac) return;
+          // set MASTER volume if needed
+          try {
+            MASTER = ac._master || MASTER;
+            if (!MASTER) {
+              MASTER = ac.createGain();
+              MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+              MASTER.connect(ac.destination);
+              ac._master = MASTER;
+            } else {
+              MASTER.gain.setValueAtTime(masterVolRef.current, ac.currentTime);
+            }
+          } catch (e) {}
+          // resume if suspended
+          return resumeIfSuspended(ac);
+        })
+        .catch((e) => {
+          console.warn("create/resume AC failed on play:", e);
+        });
     } else {
+      // stop all scheduled playback & optionally suspend AC
       stopAll();
-      try {
-        ac.suspend?.();
-      } catch {}
+      const existing = getExistingAC();
+      if (existing) {
+        try {
+          existing.suspend?.();
+        } catch (e) {}
+      }
     }
   }, [isPlaying]);
 
@@ -354,14 +507,11 @@ const AudioPlayer = forwardRef(function AudioPlayer(
     }
   }, [seekAudio]);
 
-  // main scheduler
+  // main scheduler: schedule clips when playing
   useEffect(() => {
     if (!isPlaying) return;
 
-    const ac = getAC();
     const sessionAtTick = sessionRef.current;
-
-    // allow less-aggressive corrections while displaying an image
     const suppressContinuousCorrections = activeVisualType === "image";
 
     const wantedIds = new Set();
@@ -371,7 +521,6 @@ const AudioPlayer = forwardRef(function AudioPlayer(
       const e = active.get(clip.id);
       if (e) {
         const s = e.clipSnapshot;
-        // If timing or url/gain changed, restart the source (still do it)
         if (
           s.startTime !== clip.startTime ||
           s.endTime !== clip.endTime ||
@@ -380,27 +529,14 @@ const AudioPlayer = forwardRef(function AudioPlayer(
           s.url !== clip.url ||
           s.gain !== clip.gain
         ) {
-          // When showing an image we try to avoid tiny drift restarts, but if the clip definitively changed we restart.
           stopClip(clip.id, true);
         }
       }
 
       if (!active.has(clip.id)) {
-        // extra guard: only schedule if actually overlapping now
-        if (
-          inWindow(clip, currentTime) ||
-          inWindow(clip, currentTime + 0.001)
-        ) {
-          // pass sessionAtTick / refs down to startClip for safety
-          startClip(
-            ac,
-            clip,
-            currentTime,
-            masterVolRef.current,
-            sessionAtTick,
-            isPlayingRef,
-            sessionRef
-          );
+        if (inWindow(clip, currentTime) || inWindow(clip, currentTime + 0.001)) {
+          // startClip returns a promise; we don't await it here
+          startClip(clip, currentTime, masterVolRef.current, sessionAtTick, isPlayingRef, sessionRef);
         }
       }
     }
