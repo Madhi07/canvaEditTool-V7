@@ -121,6 +121,30 @@ export default function VideoPlayer({
     const onReady = () => {
       player.off("loadedmetadata", onReady);
       if (!player.paused()) player.pause();
+      // Apply nextVideo's playbackRate & volume to the primed tech so when played it respects settings.
+      try {
+        if (typeof nextVideo.playbackRate === "number") {
+          // video.js API: playbackRate(rate)
+          player.playbackRate(Number(nextVideo.playbackRate));
+        }
+        if (typeof nextVideo.volume === "number") {
+          // video.js API: volume(0..1)
+          player.volume(Number(nextVideo.volume));
+        }
+      } catch (err) {
+        // fallback to underlying media element
+        try {
+          const mediaEl =
+            playerRef.current?.tech_?.el() ||
+            playerRef.current?.el()?.querySelector("video");
+          if (mediaEl) {
+            if (typeof nextVideo.playbackRate === "number")
+              mediaEl.playbackRate = Number(nextVideo.playbackRate);
+            if (typeof nextVideo.volume === "number")
+              mediaEl.volume = Number(nextVideo.volume);
+          }
+        } catch {}
+      }
     };
 
     if (player.readyState() >= 1) onReady();
@@ -180,6 +204,38 @@ export default function VideoPlayer({
           } catch {}
         }
 
+        // Apply per-clip playbackRate & volume here (for newly loaded clip)
+        try {
+          if (typeof currentClip.playbackRate === "number") {
+            player.playbackRate(Number(currentClip.playbackRate));
+          } else {
+            // ensure default 1 if not provided
+            player.playbackRate(1);
+          }
+        } catch (err) {
+          // fallback to native element
+          try {
+            if (mediaEl && typeof currentClip.playbackRate === "number") {
+              mediaEl.playbackRate = Number(currentClip.playbackRate);
+            }
+          } catch {}
+        }
+
+        try {
+          if (typeof currentClip.volume === "number") {
+            player.volume(Number(currentClip.volume));
+          } else {
+            player.volume(1);
+            if (mediaEl) mediaEl.volume = 1;
+          }
+        } catch (err) {
+          try {
+            if (mediaEl && typeof currentClip.volume === "number") {
+              mediaEl.volume = Number(currentClip.volume);
+            }
+          } catch {}
+        }
+
         if (Math.abs((player.currentTime() ?? 0) - seekTo) > 0.02) {
           player.currentTime(seekTo);
         }
@@ -194,6 +250,33 @@ export default function VideoPlayer({
     } else {
       const drift = Math.abs((player.currentTime() ?? 0) - seekTo);
       if (drift > 0.1) player.currentTime(seekTo);
+
+      // if clip already loaded, ensure its playbackRate & volume are enforced
+      try {
+        if (typeof currentClip.playbackRate === "number") {
+          player.playbackRate(Number(currentClip.playbackRate));
+        }
+      } catch (err) {
+        try {
+          const mediaEl =
+            playerRef.current?.tech_?.el() ||
+            playerRef.current?.el()?.querySelector("video");
+          if (mediaEl && typeof currentClip.playbackRate === "number")
+            mediaEl.playbackRate = Number(currentClip.playbackRate);
+        } catch {}
+      }
+
+      try {
+        if (typeof currentClip.volume === "number") {
+          player.volume(Number(currentClip.volume));
+          try {
+            const mediaEl =
+              playerRef.current?.tech_?.el() ||
+              playerRef.current?.el()?.querySelector("video");
+            if (mediaEl) mediaEl.volume = Number(currentClip.volume);
+          } catch {}
+        }
+      } catch {}
 
       if (isPlaying) {
         if (player.paused()) {
@@ -215,30 +298,49 @@ export default function VideoPlayer({
     currentClip?.mimeType,
     isPlayerReady,
     isPlaying,
+    // note: we intentionally do NOT add currentClip.playbackRate/currentClip.volume as deps here
+    // so we don't duplicate effects — the dedicated effect below handles runtime changes.
   ]);
 
-  // EFFECT C: React to play/pause toggles (only when current clip’s src is set)
+  // EFFECT: respond to runtime changes to playbackRate or volume while clip is already loaded
   useEffect(() => {
     const player = playerRef.current;
     if (!player || !isPlayerReady || !currentClip) return;
 
-    if (!player.currentSrc() || playerRef.current.clipId !== currentClip.id)
+    // Only apply if the currently loaded clip matches the currentClip
+    const loadedSrc = getCurrentSourceUrl();
+    if (!loadedSrc || playerRef.current.clipId !== currentClip.id) {
       return;
-
-    if (isPlaying) {
-      if (player.paused()) {
-        const playPromise = player.play();
-        if (playPromise !== undefined) {
-          playPromise.catch((err) => {
-            console.warn("Play blocked:", err);
-            if (err?.name === "NotAllowedError") onPlayPause();
-          });
-        }
-      }
-    } else {
-      if (!player.paused()) player.pause();
     }
-  }, [isPlaying, isPlayerReady, currentClip?.id, onPlayPause]);
+
+    // Apply playbackRate if provided
+    if (typeof currentClip.playbackRate === "number") {
+      try {
+        player.playbackRate(Number(currentClip.playbackRate));
+      } catch (err) {
+        try {
+          const mediaEl =
+            playerRef.current?.tech_?.el() ||
+            playerRef.current?.el()?.querySelector("video");
+          if (mediaEl) mediaEl.playbackRate = Number(currentClip.playbackRate);
+        } catch {}
+      }
+    }
+
+    // Apply volume if provided (0..1)
+    if (typeof currentClip.volume === "number") {
+      try {
+        player.volume(Number(currentClip.volume));
+      } catch (err) {
+        try {
+          const mediaEl =
+            playerRef.current?.tech_?.el() ||
+            playerRef.current?.el()?.querySelector("video");
+          if (mediaEl) mediaEl.volume = Number(currentClip.volume);
+        } catch {}
+      }
+    }
+  }, [currentClip?.playbackRate, currentClip?.volume, isPlayerReady, currentClip?.id]);
 
   /** Enforce full mute on the real media element */
   useEffect(() => {

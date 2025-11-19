@@ -185,7 +185,7 @@ export default function Home() {
 
         const duration = Math.max(
           0.001,
-          (target.duration || target.endTime - target.startTime) -
+          (target.duration || target.endTime - target.startTime || 0) -
             (target.trimStart || 0) -
             (target.trimEnd || 0)
         );
@@ -811,6 +811,8 @@ export default function Home() {
     }
   };
 
+  // Replace the existing getCurrentClip() with this function in index.js
+
   const getCurrentClip = useCallback(() => {
     const visualClips = clips
       .filter((c) => c.type === "video" || c.type === "image")
@@ -831,22 +833,40 @@ export default function Home() {
 
     const relativeTime = Math.max(
       0,
-      currentTime - activeClip.startTime + activeClip.trimStart
+      currentTime - activeClip.startTime + (activeClip.trimStart || 0)
     );
     const maxRel =
-      activeClip.duration - activeClip.trimStart - activeClip.trimEnd;
+      (activeClip.duration || activeClip.endTime - activeClip.startTime) -
+      (activeClip.trimStart || 0) -
+      (activeClip.trimEnd || 0);
     const clampedRelativeTime = Math.min(
       relativeTime,
       Math.max(0, maxRel - EPS)
     );
 
     return {
+      // spread entire clip so VideoPlayer can use other fields too (thumbnail, mimeType, etc.)
+      ...activeClip,
       id: activeClip.id,
       url: activeClip.url,
       type: activeClip.type,
       startTime: activeClip.startTime,
       relativeTime: clampedRelativeTime,
-      hasAudio: activeClip.hasAudio,
+      hasAudio: !!activeClip.hasAudio,
+      // important fields for immediate playback changes
+      playbackRate:
+        typeof activeClip.playbackRate === "number"
+          ? activeClip.playbackRate
+          : 1,
+      volume:
+        typeof activeClip.volume === "number"
+          ? activeClip.volume
+          : activeClip.type === "video"
+          ? 1
+          : undefined,
+      mimeType: activeClip.mimeType,
+      thumbnail: activeClip.thumbnail,
+      duration: activeClip.duration,
     };
   }, [currentTime, clips, totalDuration, EPS]);
 
@@ -1415,6 +1435,48 @@ export default function Home() {
   // end adapter
   // -----------------------
 
+  // =========================
+  // *** ADDED HANDLERS (minimal)
+  // =========================
+
+  // Delete handler (used by toolbar)
+  const handleDeleteClip = useCallback(
+    (clipId) => {
+      setClips((prev) => prev.filter((c) => c.id !== clipId));
+      setSelectedClipId((cur) => (cur === clipId ? null : cur));
+    },
+    [setClips]
+  );
+
+  // Per-clip volume setter (0..1)
+  const handleChangeVolume = useCallback(
+    (clipId, newVolume) => {
+      const v = Number(newVolume);
+      const clamped = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
+      setClips((prev) =>
+        prev.map((c) => (c.id === clipId ? { ...c, volume: clamped } : c))
+      );
+      // If you manage audio via WebAudio, make sure AudioPlayer picks up / applies clip.volume
+    },
+    [setClips]
+  );
+
+  // Per-clip playback speed setter (video)
+  const handleChangeSpeed = useCallback(
+    (clipId, newRate) => {
+      const r = Number(newRate);
+      const clamped = Number.isFinite(r) ? Math.max(0.25, Math.min(4, r)) : 1;
+      setClips((prev) =>
+        prev.map((c) => (c.id === clipId ? { ...c, playbackRate: clamped } : c))
+      );
+    },
+    [setClips]
+  );
+
+  // =========================
+  // end ADDED HANDLERS
+  // =========================
+
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">
       <div className="container mx-auto px-6 py-6 space-y-6">
@@ -1451,6 +1513,10 @@ export default function Home() {
             selectedClipId={selectedClipId}
             onAutoLayerFix={handleAutoLayerFix}
             onCommitMove={commitMoveAndSync}
+            // *** ADDED: toolbar action props so Timeline's ClipToolbar can call back
+            onDelete={handleDeleteClip} // Delete button
+            onChangeVolume={handleChangeVolume} // Volume slider
+            onChangeSpeed={handleChangeSpeed} // Speed selector (video)
           />
         </div>
 

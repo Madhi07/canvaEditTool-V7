@@ -303,7 +303,9 @@ function startClip(clip, timelineNow, masterVol, sessionAtStart, isPlayingRef, s
       src.buffer = buffer;
       const g = ac.createGain();
 
-      const perClip = clip.gain != null ? clip.gain : 1;
+      // *** UPDATED: prefer clip.volume (toolbar writes clip.volume). fallback to clip.gain for backward compat.
+      // final per-clip scalar is: clip.volume (if present) -> clip.gain -> 1
+      const perClip = (clip.volume != null ? clip.volume : (clip.gain != null ? clip.gain : 1));
       const targetGain = Math.max(0, Math.min(1, perClip)) * Math.max(0, Math.min(1, masterVol));
 
       // Final guard
@@ -364,7 +366,9 @@ function startClip(clip, timelineNow, masterVol, sessionAtStart, isPlayingRef, s
           trimStart: clip.trimStart,
           trimEnd: clip.trimEnd,
           url: clip.url,
+          // *** UPDATED: record both gain and volume so mutations to either will trigger restart
           gain: clip.gain,
+          volume: clip.volume,
         },
         teardownTimerId: null,
         onendedHandler,
@@ -521,13 +525,15 @@ const AudioPlayer = forwardRef(function AudioPlayer(
       const e = active.get(clip.id);
       if (e) {
         const s = e.clipSnapshot;
+        // *** UPDATED: include both gain and volume in change detection
         if (
           s.startTime !== clip.startTime ||
           s.endTime !== clip.endTime ||
           s.trimStart !== clip.trimStart ||
           s.trimEnd !== clip.trimEnd ||
           s.url !== clip.url ||
-          s.gain !== clip.gain
+          s.gain !== clip.gain ||
+          s.volume !== clip.volume
         ) {
           stopClip(clip.id, true);
         }
