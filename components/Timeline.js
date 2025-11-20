@@ -5,7 +5,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import AudioClipWaveform from "./AudioClipWaveform";
 import ClipToolbar from "./ClipToolbar";
-// the stable toolbar inline (so it's self-contained and won't require changes).
 // Minimum duration in seconds to prevent trim collapse
 const MIN_CLIP_DURATION = 0.1;
 
@@ -48,8 +47,8 @@ export default function Timeline({
   const pixelsPerSecond = 100 * zoomLevel;
   const maxDuration = Math.max(totalDuration, 60);
   const timelineWidth = maxDuration * pixelsPerSecond;
-  const videoClipHeight = 80;
-  const audioClipHeight = 50;
+  const videoClipHeight = 70;
+  const audioClipHeight = 45;
 
   // ---- Framer-driven scroll logic ----
   const scrollTarget = useMotionValue(0);
@@ -194,11 +193,30 @@ export default function Timeline({
   // show toolbar on right-click (context menu) on a clip
   // we'll attach onContextMenu to each clip node below (so left-click still functions as before)
   const showToolbarForClip = (clip, e) => {
+    // prevent browser context menu and don't let event bubble to timeline
     e.preventDefault();
     e.stopPropagation();
-    // set selection as well
+
+    // compute clicked time (same calculation as handleTimelineClick)
+    // guard in case timelineRef isn't available yet
+    let clickedTime = clip.startTime ?? 0;
+    if (timelineRef.current) {
+      const rect = timelineRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const rawTime = Math.max(0, Math.min(x / pixelsPerSecond, totalDuration));
+      // clamp into clip bounds (so right-click on a clip always seeks inside it)
+      clickedTime = Math.max(
+        clip.startTime ?? 0,
+        Math.min(rawTime, clip.endTime ?? rawTime)
+      );
+    }
+
+    // select the clip and seek the timeline to the right-click position
     onClipSelect(clip);
-    // compute stable pos
+    // call parent's seek handler (parent will update currentTime etc.)
+    onSeek && onSeek(clickedTime, clip.id);
+
+    // compute stable toolbar position and show it (unchanged)
     const pos = computeStableToolbarPos();
     setToolbarPagePos(pos);
     setToolbarClipId(clip.id);
@@ -296,7 +314,7 @@ export default function Timeline({
 
   const handleClipMouseDown = (e, clip, type) => {
     // left-click: keep existing behavior (selection + drag start)
-    // if toolbar is visible, hide it on left-click (user expects it)
+    // if toolbar is visible, hide it on left-click 
     if (toolbarVisible) {
       // left click should close toolbar
       hideToolbar();
@@ -803,7 +821,7 @@ export default function Timeline({
             let trackPosition =
               clip.type === "audio"
                 ? videoClipHeight +
-                  60 +
+                  30 +
                   (clip.track || 0) * (audioClipHeight + 20)
                 : 20;
             const baseBgColor =
@@ -955,6 +973,18 @@ export default function Timeline({
                     zIndex: 99999,
                     pointerEvents: "auto",
                   }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation && e.stopImmediatePropagation();
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation && e.stopImmediatePropagation();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation && e.stopImmediatePropagation();
+                  }}
                 >
                   <ClipToolbar
                     clip={toolbarClip}
@@ -979,6 +1009,20 @@ export default function Timeline({
                     onChangeSpeed={(id, r) => {
                       onChangeSpeed && onChangeSpeed(id, r);
                     }}
+                    /* ------------------ NEW props for image duration ------------------ */
+                    onChangeDuration={(id, seconds) => {
+                      // call the timeline helper that sets an absolute duration for image clips
+                      // toolbarSetImageDuration should already exist in this file
+                      toolbarSetImageDuration(id, seconds);
+                      // DO NOT hideToolbar() — allow continued editing
+                    }}
+                    onAdjustDuration={(id, deltaSeconds) => {
+                      // incremental adjust, e.g. +0.5s / -0.5s quick buttons
+                      toolbarAdjustImageDuration(id, deltaSeconds);
+                    }}
+                    // expose the timeline minimum so toolbar can enforce the same guard
+                    minImageDuration={MIN_CLIP_DURATION}
+                    /* ---------------------------------------------------------------- */
                     playheadTime={currentTime}
                   />
                 </div>,

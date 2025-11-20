@@ -424,13 +424,13 @@ export default function VideoPlayer({
     typeof duration === "number" &&
     typeof currentTime === "number" &&
     currentTime >= duration - 0.05
-      ? duration // snap to full duration (0:11)
+      ? duration 
       : currentTime;
 
   return (
     <div className="flex flex-col items-center w-full justify-center bg-white rounded-lg p-4 h-[60vh]">
       {/* Video Display */}
-      <div className="relative w-full max-w-4xl h-[80%] rounded-lg overflow-hidden mb-2 flex items-center justify-center bg-black">
+      <div className="relative w-full max-w-4xl h-[80%] rounded-lg overflow-hidden mb-2 flex items-center justify-center bg-black" style={{height: 392, width: 730}}>
         <div
           className="w-full h-full flex items-center justify-center"
           style={{ transform: `scale(${safeZoom})`, transformOrigin: "center" }}

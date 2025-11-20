@@ -42,7 +42,8 @@ export default function Home() {
       track: 0,
     },
   ]);
-
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState("default-clip");
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -73,6 +74,60 @@ export default function Home() {
     totalDurationRef.current = totalDuration;
   }, [totalDuration]);
 
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
+  const MAX_HISTORY = 30;
+
+  // safe deep clone helper
+  const snapshotClips = (arr) => {
+    try {
+      return typeof structuredClone === "function"
+        ? structuredClone(arr)
+        : JSON.parse(JSON.stringify(arr));
+    } catch {
+      return arr.map((c) => ({ ...c }));
+    }
+  };
+
+  // helper to compare two clips arrays for equality (lightweight)
+  const areClipsEqual = (a, b) => {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  };
+
+  // Wrapper around setClips to record history
+  const updateClips = useCallback(
+    (newClips) => {
+      const currentSnapshot = snapshotClips(clipsRef.current || []);
+
+      // avoid pushing duplicate consecutive history entries
+      const lastHistory = undoStackRef.current.length
+        ? undoStackRef.current[undoStackRef.current.length - 1]
+        : null;
+      if (!lastHistory || !areClipsEqual(lastHistory, currentSnapshot)) {
+        undoStackRef.current.push(currentSnapshot);
+        // cap history
+        if (undoStackRef.current.length > MAX_HISTORY) {
+          undoStackRef.current.shift();
+        }
+      }
+
+      // clear redo stack on new action
+      redoStackRef.current = [];
+
+      // apply new state
+      setClips(newClips);
+
+      // update reactive booleans
+      setCanUndo(undoStackRef.current.length > 0);
+      setCanRedo(redoStackRef.current.length > 0);
+    },
+    [] // no deps; uses refs and setClips which are stable in this component
+  );
+
   // ---- new: track last manual selection so auto-select won't instantly override
   const lastManualSelectRef = useRef(0);
 
@@ -81,6 +136,31 @@ export default function Home() {
   const stopAllAudio = useCallback(() => {
     audioPlayerRef.current?.stopAll?.();
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("editor-clips");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // ensure we only accept an array
+        if (Array.isArray(parsed)) {
+          setClips(parsed);
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to load saved clips from localStorage:", err);
+    }
+    // run once on client mount
+  }, []);
+
+  // Save clips to localStorage on every change (debounce optional)
+  useEffect(() => {
+    try {
+      localStorage.setItem("editor-clips", JSON.stringify(clips));
+    } catch (err) {
+      console.warn("Failed to save clips to localStorage:", err);
+    }
+  }, [clips]);
 
   // ---------- DEFAULT CLIP METADATA LOADER
   // Skip loading/updating default clip if external visuals exist.
@@ -138,8 +218,8 @@ export default function Home() {
             console.warn("⚠️ Failed to extract default video thumbnail:", err);
           }
 
-          setClips((prev) =>
-            prev.map((c) =>
+          updateClips(
+            (clipsRef.current || []).map((c) =>
               c.id === "default-clip"
                 ? {
                     ...c,
@@ -177,58 +257,84 @@ export default function Home() {
   // reorder visuals, auto-reflow them sequentially, and update app-state and external JSON
   const commitMoveAndSync = useCallback(
     (clipId, finalStart) => {
-      // Update the moved clip's start/end in the clips state
-      setClips((prev) => {
-        const prevCopy = prev.map((c) => ({ ...c }));
-        const target = prevCopy.find((c) => c.id === clipId);
-        if (!target) return prev;
+      const prevCopy = (clipsRef.current || []).map((c) => ({ ...c }));
+      const target = prevCopy.find((c) => c.id === clipId);
+      if (!target) return;
 
-        const duration = Math.max(
+      const duration = Math.max(
+        0.001,
+        (target.duration || target.endTime - target.startTime || 0) -
+          (target.trimStart || 0) -
+          (target.trimEnd || 0)
+      );
+
+      target.startTime = finalStart;
+      target.endTime = finalStart + duration;
+
+      const visuals = prevCopy
+        .filter((c) => c.type === "video" || c.type === "image")
+        .sort((a, b) => a.startTime - b.startTime || (a.id > b.id ? 1 : -1));
+
+      let cur = 0;
+      const reflowedVisuals = visuals.map((v) => {
+        const len = Math.max(
           0.001,
-          (target.duration || target.endTime - target.startTime || 0) -
-            (target.trimStart || 0) -
-            (target.trimEnd || 0)
+          v.duration - (v.trimStart || 0) - (v.trimEnd || 0)
         );
-        target.startTime = finalStart;
-        target.endTime = finalStart + duration;
-
-        // 1) sort visuals by start time, 2) auto-reflow visuals sequentially (pack)
-        const visuals = prevCopy
-          .filter((c) => c.type === "video" || c.type === "image")
-          .sort((a, b) => a.startTime - b.startTime || (a.id > b.id ? 1 : -1));
-
-        let cur = 0;
-        const reflowedVisuals = visuals.map((v) => {
-          const len = Math.max(
-            0.001,
-            v.duration - (v.trimStart || 0) - (v.trimEnd || 0)
-          );
-          const newV = { ...v, startTime: cur, endTime: cur + len };
-          cur += len;
-          return newV;
-        });
-
-        // replace visuals in prevCopy with reflowed visuals (keep non-visuals unchanged)
-        const nonVisuals = prevCopy.filter(
-          (c) => !(c.type === "video" || c.type === "image")
-        );
-        const merged = [...reflowedVisuals, ...nonVisuals];
-
-        // update tracks for audio layers (reuse your helper)
-        return fixAudioTrackLayers(merged);
+        const newV = { ...v, startTime: cur, endTime: cur + len };
+        cur += len;
+        return newV;
       });
 
-      // After setClips (state update queued), schedule a sync to ClipsData JSON
-      // Use timeout 0 to run after state update was applied
+      const nonVisuals = prevCopy.filter(
+        (c) => !(c.type === "video" || c.type === "image")
+      );
+
+      const merged = [...reflowedVisuals, ...nonVisuals];
+      const finalClips = fixAudioTrackLayers(merged);
+
+      updateClips(finalClips);
+
       setTimeout(() => {
-        // read current clipsRef which is kept in sync via clipsRef.current
         syncClipsToClipsData(clipsRef.current);
       }, 0);
     },
-    [
-      /* no deps required (fixAudioTrackLayers is hoisted) */
-    ]
+    [updateClips]
   );
+
+  const undo = useCallback(() => {
+    if (undoStackRef.current.length === 0) return false;
+
+    const previous = undoStackRef.current.pop();
+    // push current state to redo
+    redoStackRef.current.push(snapshotClips(clipsRef.current || []));
+
+    // apply previous
+    setClips(previous);
+
+    // update reactive flags
+    setCanUndo(undoStackRef.current.length > 0);
+    setCanRedo(redoStackRef.current.length > 0);
+
+    return true;
+  }, []);
+
+  const redo = useCallback(() => {
+    if (redoStackRef.current.length === 0) return false;
+
+    const next = redoStackRef.current.pop();
+    // push current state to undo
+    undoStackRef.current.push(snapshotClips(clipsRef.current || []));
+
+    // apply next
+    setClips(next);
+
+    // update reactive flags
+    setCanUndo(undoStackRef.current.length > 0);
+    setCanRedo(redoStackRef.current.length > 0);
+
+    return true;
+  }, []);
 
   // Build a new ClipsData structure from app clips (visual order -> slides order)
   const syncClipsToClipsData = useCallback(async (currentClips) => {
@@ -414,22 +520,45 @@ export default function Home() {
     [isPlaying, stopAllAudio]
   );
 
+  async function uploadManualImage(slideUuid, file) {
+    const formData = new FormData();
+    formData.append("slide_uuid", slideUuid);
+    formData.append("image", file);
+
+    const res = await fetch(
+      "https://media-v2.episyche.com/media/manual-image-upload",
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+
+    return res.json();
+  }
+
   const handleMediaUpload = async (file, type) => {
-    const url = URL.createObjectURL(file);
+    // create a local object URL early for duration / thumbnail work & fallback
+    const localUrl = URL.createObjectURL(file);
 
     const getDuration = () =>
       new Promise((resolve) => {
-        if (type === "image") return resolve(3);
+        if (type === "image") return resolve(3); // default image duration
         const media =
           type === "video"
             ? document.createElement("video")
             : document.createElement("audio");
-        media.src = url;
+        media.src = localUrl;
         media.onloadedmetadata = () => resolve(media.duration || 0);
+        // add a small timeout fallback in case metadata doesn't fire
+        setTimeout(() => {
+          // if duration still unknown, resolve 0
+          resolve(media.duration || 0);
+        }, 2000);
       });
 
     const duration = await getDuration();
 
+    // compute startTime and track depending on type
     let startTime = 0;
     let track = 0;
     if (type === "video" || type === "image") {
@@ -454,20 +583,72 @@ export default function Home() {
       track = nextTrack;
     }
 
+    // try to extract/generate a thumbnail (video or image)
     let thumbnail = null;
     try {
       if (type === "video")
         thumbnail = await extractThumbnailFromVideo(file, 1);
       else if (type === "image") thumbnail = await getImageThumbnail(file);
-      if (thumbnail) new Image().src = thumbnail;
+
+      if (thumbnail) new Image().src = thumbnail; // pre-load
     } catch (error) {
       console.error("Thumbnail extraction failed:", error);
     }
 
+    // For images: upload to manual-image-upload endpoint and use returned URL.
+    // If upload fails, fallback to the local object URL.
+    let finalUrl = localUrl;
+    if (type === "image") {
+      try {
+        // create a slide UUID for the server
+        const slideUuid =
+          typeof crypto !== "undefined" && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `slide-${Date.now()}`;
+
+        const formData = new FormData();
+        formData.append("slide_uuid", slideUuid);
+        formData.append("image", file);
+
+        const res = await fetch(
+          "https://media-v2.episyche.com/media/manual-image-upload/",
+          {
+            method: "POST",
+            body: formData,
+            // Note: DO NOT set Content-Type header here. Browser will set multipart/form-data boundary.
+          }
+        );
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          console.warn("Image upload failed:", res.status, text);
+        } else {
+          const data = await res.json().catch(() => null);
+          // The API should ideally return a direct URL for the uploaded image.
+          // Use it if present; otherwise fallback to local object URL.
+          if (data && (data.url || data.image_url || data.file_url)) {
+            finalUrl = data.url || data.image_url || data.file_url;
+          } else if (data && data.success && data.path) {
+            // fallback if API returns path
+            finalUrl = data.path;
+          } else {
+            console.warn(
+              "Upload response didn't contain a usable URL, falling back to local URL.",
+              data
+            );
+          }
+        }
+      } catch (err) {
+        console.error("Image upload error:", err);
+        // continue with localUrl as fallback
+      }
+    }
+
+    // Build the new clip object
     const newClip = {
       id: `clip-${Date.now()}`,
       type,
-      url,
+      url: finalUrl,
       fileName: file.name,
       mimeType: file.type || (type === "audio" ? "audio/mpeg" : "video/mp4"),
       duration,
@@ -480,97 +661,93 @@ export default function Home() {
       track,
     };
 
-    setClips((prev) => fixAudioTrackLayers([...prev, newClip]));
+    // add to clips state (preserving audio track layering helper)
+    updateClips(fixAudioTrackLayers([...(clipsRef.current || []), newClip]));
 
     if (!selectedClipId) setSelectedClipId(newClip.id);
+
+    // revoke object URL after some time (optional cleanup)
+    // setTimeout(() => URL.revokeObjectURL(localUrl), 30000);
+
+    return newClip;
   };
 
   const handleSplitClip = (clipId, splitTime) => {
-    setClips((prevClips) => {
-      const updated = [...prevClips];
-      const index = updated.findIndex((c) => c.id === clipId);
-      if (index === -1) return prevClips;
+    const prevClips = clipsRef.current || [];
+    const updated = [...prevClips];
+    const index = updated.findIndex((c) => c.id === clipId);
+    if (index === -1) return;
 
-      const clip = updated[index];
+    const clip = updated[index];
 
-      // Compute total visible length (accounting for trims)
-      const totalVisible =
-        (clip.duration || clip.endTime - clip.startTime || 0) -
-        (clip.trimStart || 0) -
-        (clip.trimEnd || 0);
+    // Compute total visible length (accounting for trims)
+    const totalVisible =
+      (clip.duration || clip.endTime - clip.startTime || 0) -
+      (clip.trimStart || 0) -
+      (clip.trimEnd || 0);
 
-      // If there's no visible duration or split is near edges -> ignore
-      const REL_EPS = 0.05; // 50ms tolerance
-      const splitOffset = splitTime - clip.startTime; // seconds from clip start
-      if (totalVisible <= 0) return prevClips;
-      if (splitOffset <= REL_EPS || splitOffset >= totalVisible - REL_EPS)
-        return prevClips;
+    // If there's no visible duration or split is near edges -> ignore
+    const REL_EPS = 0.05; // 50ms tolerance
+    const splitOffset = splitTime - clip.startTime; // seconds from clip start
+    if (totalVisible <= 0) return;
+    if (splitOffset <= REL_EPS || splitOffset >= totalVisible - REL_EPS) return;
 
-      // Convert to absolute trim positions (relative to original clip.duration)
-      const splitRelative = (clip.trimStart || 0) + splitOffset;
+    // Convert to absolute trim positions (relative to original clip.duration)
+    const splitRelative = (clip.trimStart || 0) + splitOffset;
 
-      // Build first and second parts
-      const nowTag = Date.now();
-      const firstPart = {
-        ...clip,
-        id: `${clip.id}-part1-${nowTag}`,
-        // first part keeps original startTime, ends at splitTime
-        endTime: splitTime,
-        // trimStart unchanged, trimEnd adjusted so first part visible length is splitOffset
-        trimStart: clip.trimStart || 0,
-        trimEnd: Math.max(
-          0,
-          (clip.duration || clip.endTime - clip.startTime || 0) - splitRelative
-        ),
-      };
+    // Build first and second parts
+    const nowTag = Date.now();
+    const firstPart = {
+      ...clip,
+      id: `${clip.id}-part1-${nowTag}`,
+      endTime: splitTime,
+      trimStart: clip.trimStart || 0,
+      trimEnd: Math.max(
+        0,
+        (clip.duration || clip.endTime - clip.startTime || 0) - splitRelative
+      ),
+      startTime: clip.startTime,
+    };
 
-      const secondPart = {
-        ...clip,
-        id: `${clip.id}-part2-${nowTag}`,
-        // second part starts at splitTime, ends at original end
-        startTime: splitTime,
-        // trimStart becomes splitRelative (we start from the split)
-        trimStart: Math.max(0, splitRelative),
-        trimEnd: clip.trimEnd || 0,
-      };
+    const secondPart = {
+      ...clip,
+      id: `${clip.id}-part2-${nowTag}`,
+      startTime: splitTime,
+      trimStart: Math.max(0, splitRelative),
+      trimEnd: clip.trimEnd || 0,
+      endTime: clip.endTime,
+    };
 
-      // Ensure firstPart.startTime exists and secondPart.endTime exists
-      firstPart.startTime = clip.startTime;
-      secondPart.endTime = clip.endTime;
+    updated.splice(index, 1, firstPart, secondPart);
 
-      // Replace the clip in array
-      updated.splice(index, 1, firstPart, secondPart);
+    // After splitting, we should fix audio layers or reflow visuals:
+    let final = updated;
 
-      // After splitting, we should fix audio layers or reflow visuals:
-      let final = updated;
-
-      if (clip.type === "audio") {
-        // recompute audio tracks to avoid collisions
-        final = fixAudioTrackLayers(final);
-      } else if (clip.type === "image" || clip.type === "video") {
-        // For visual clips, we likely want timeline to auto-reflow visuals sequentially.
-        // Call your existing autoReflowClips helper to rebuild visual order/timings.
-        if (typeof autoReflowClips === "function") {
-          final = autoReflowClips(final);
-        }
+    if (clip.type === "audio") {
+      // recompute audio tracks to avoid collisions
+      final = fixAudioTrackLayers(final);
+    } else if (clip.type === "image" || clip.type === "video") {
+      // For visual clips, we likely want timeline to auto-reflow visuals sequentially.
+      if (typeof autoReflowClips === "function") {
+        final = autoReflowClips(final);
       }
+    }
 
-      // Keep selection consistent: select first part
-      setSelectedClipId(firstPart.id);
+    // Keep selection consistent: select first part
+    setSelectedClipId(firstPart.id);
 
-      // Update totalDuration if needed
-      const maxVisualEnd = Math.max(
-        ...final
-          .filter((c) => c.type === "video" || c.type === "image")
-          .map((c) => c.endTime)
-      );
-      if (isFinite(maxVisualEnd) && maxVisualEnd > 0) {
-        setTotalDuration((prev) => Math.max(prev, maxVisualEnd));
-      }
+    // Update totalDuration if needed
+    const maxVisualEnd = Math.max(
+      ...final
+        .filter((c) => c.type === "video" || c.type === "image")
+        .map((c) => c.endTime)
+    );
+    if (isFinite(maxVisualEnd) && maxVisualEnd > 0) {
+      setTotalDuration((prev) => Math.max(prev, maxVisualEnd));
+    }
 
-      // Return new clips array
-      return final;
-    });
+    // Persist
+    updateClips(final);
   };
 
   // replace the const version with this hoisted function so it's available earlier
@@ -606,7 +783,7 @@ export default function Home() {
   const handleAutoLayerFix = useCallback(
     (updatedClips) => {
       const fixed = fixAudioTrackLayers(updatedClips);
-      setClips(fixed);
+      updateClips(fixed);
 
       // Sync to ClipsData (use microtask so clipsRef.current is up-to-date)
       setTimeout(() => {
@@ -623,78 +800,75 @@ export default function Home() {
   // IMPORTANT: UPDATED handler to support trimming effects
   // --------------------------
   const handleClipUpdate = (clipId, updates) => {
-    setClips((prev) => {
-      const target = prev.find((c) => c.id === clipId);
-      if (!target) return prev;
+    // snapshot current clips (the hook exposes `clips`)
+    const prev = clipsRef.current || [];
+    const target = prev.find((c) => c.id === clipId);
+    if (!target) return;
 
-      // merge simple updates first
-      let updated = prev.map((c) =>
-        c.id === clipId ? { ...c, ...updates } : c
+    // merge simple updates first (shallow merge for the target clip)
+    let updated = prev.map((c) => (c.id === clipId ? { ...c, ...updates } : c));
+
+    const affectsTimeline =
+      updates.startTime !== undefined ||
+      updates.trimStart !== undefined ||
+      updates.trimEnd !== undefined;
+
+    const isVisual =
+      target && (target.type === "video" || target.type === "image");
+
+    if (isVisual && affectsTimeline) {
+      // read old trim values from the original target
+      const oldTrimStart = Number(target.trimStart || 0);
+      const oldTrimEnd = Number(target.trimEnd || 0);
+
+      // pick new trim values (may not be provided in updates)
+      const newClip = updated.find((c) => c.id === clipId);
+      const newTrimStart =
+        updates.trimStart !== undefined
+          ? Number(updates.trimStart || 0)
+          : oldTrimStart;
+      const newTrimEnd =
+        updates.trimEnd !== undefined
+          ? Number(updates.trimEnd || 0)
+          : oldTrimEnd;
+
+      // compute visible length based on original media duration
+      const mediaDuration = Number(
+        newClip.duration || newClip.endTime - newClip.startTime || 0
+      );
+      const visibleLen = Math.max(
+        0.001,
+        mediaDuration - newTrimStart - newTrimEnd
       );
 
-      const affectsTimeline =
-        updates.startTime !== undefined ||
-        updates.trimStart !== undefined ||
-        updates.trimEnd !== undefined;
+      // compute new startTime:
+      const deltaTrimStart = newTrimStart - oldTrimStart;
+      const newStartTime =
+        updates.startTime !== undefined
+          ? Number(updates.startTime)
+          : Number(target.startTime) + deltaTrimStart;
 
-      const isVisual =
-        target && (target.type === "video" || target.type === "image");
+      const newEndTime = newStartTime + visibleLen;
 
-      if (isVisual && affectsTimeline) {
-        // read old trim values from the original target
-        const oldTrimStart = Number(target.trimStart || 0);
-        const oldTrimEnd = Number(target.trimEnd || 0);
+      // apply the computed times and trims to the updated array
+      updated = updated.map((c) =>
+        c.id === clipId
+          ? {
+              ...c,
+              trimStart: newTrimStart,
+              trimEnd: newTrimEnd,
+              startTime: newStartTime,
+              endTime: newEndTime,
+            }
+          : c
+      );
 
-        // pick new trim values (may not be provided in updates)
-        const newClip = updated.find((c) => c.id === clipId);
-        const newTrimStart =
-          updates.trimStart !== undefined
-            ? Number(updates.trimStart || 0)
-            : oldTrimStart;
-        const newTrimEnd =
-          updates.trimEnd !== undefined
-            ? Number(updates.trimEnd || 0)
-            : oldTrimEnd;
+      // Auto-reflow visual clips so downstream clips shift to accommodate new length
+      updated = autoReflowClips(updated);
+    }
 
-        // compute visible length based on original media duration
-        const mediaDuration = Number(
-          newClip.duration || newClip.endTime - newClip.startTime || 0
-        );
-        const visibleLen = Math.max(
-          0.001,
-          mediaDuration - newTrimStart - newTrimEnd
-        );
-
-        // compute new startTime:
-        // if user supplied an explicit startTime in updates, honor it
-        // otherwise shift startTime forward by the left-trim delta (increase trimStart -> move right)
-        const deltaTrimStart = newTrimStart - oldTrimStart;
-        const newStartTime =
-          updates.startTime !== undefined
-            ? Number(updates.startTime)
-            : Number(target.startTime) + deltaTrimStart;
-
-        const newEndTime = newStartTime + visibleLen;
-
-        // apply the computed times and trims to the updated array
-        updated = updated.map((c) =>
-          c.id === clipId
-            ? {
-                ...c,
-                trimStart: newTrimStart,
-                trimEnd: newTrimEnd,
-                startTime: newStartTime,
-                endTime: newEndTime,
-              }
-            : c
-        );
-
-        // Auto-reflow visual clips so downstream clips shift to accommodate new length
-        updated = autoReflowClips(updated);
-      }
-
-      return updated;
-    });
+    // Persist the change using updateClips (records history)
+    updateClips(updated);
 
     // Immediately sync to ClipsData JSON (use microtask so clipsRef is updated)
     setTimeout(() => {
@@ -876,6 +1050,73 @@ export default function Home() {
     }
   }, [clips, selectedClipId]);
 
+  const handleDeleteClip = useCallback(
+    (clipId) => {
+      const prev = clipsRef.current || [];
+      const target = prev.find((c) => c.id === clipId);
+      if (!target) return;
+
+      // Remove the clip
+      const remaining = prev.filter((c) => c.id !== clipId);
+
+      let final = remaining;
+
+      // If the deleted clip is visual, auto-reflow visuals so gaps are filled.
+      if (target.type === "video" || target.type === "image") {
+        // collect visuals sorted by start (so reflow order is deterministic)
+        const visuals = remaining
+          .filter((c) => c.type === "video" || c.type === "image")
+          .sort((a, b) => a.startTime - b.startTime || (a.id > b.id ? 1 : -1));
+
+        // reflow visuals sequentially (pack starting at 0)
+        let cur = 0;
+        const reflowed = visuals.map((v) => {
+          const len = Math.max(
+            0.001,
+            (v.duration || v.endTime - v.startTime || 0) -
+              (v.trimStart || 0) -
+              (v.trimEnd || 0)
+          );
+          const newV = { ...v, startTime: cur, endTime: cur + len };
+          cur += len;
+          return newV;
+        });
+
+        // keep non-visuals (audio) unchanged
+        const nonVisuals = remaining.filter(
+          (c) => !(c.type === "video" || c.type === "image")
+        );
+
+        // merge back and fix audio track layering
+        final = fixAudioTrackLayers([...reflowed, ...nonVisuals]);
+      } else {
+        // Non-visual deletion: still ensure audio tracks are compacted
+        final = fixAudioTrackLayers(remaining);
+      }
+
+      // Persist (records history)
+      updateClips(final);
+
+      // Clear selection if we deleted the selected clip
+      setSelectedClipId((cur) => (cur === clipId ? null : cur));
+
+      // Update totalDuration to cover the new visual timeline
+      const maxVisualEnd = Math.max(
+        0,
+        ...final
+          .filter((c) => c.type === "video" || c.type === "image")
+          .map((c) => c.endTime)
+      );
+      setTotalDuration((prev) => Math.max(prev, maxVisualEnd));
+
+      // Sync ClipsData JSON after state has been applied
+      setTimeout(() => {
+        syncClipsToClipsData(clipsRef.current);
+      }, 0);
+    },
+    [updateClips]
+  );
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       const tag = (e.target.tagName || "").toUpperCase();
@@ -910,7 +1151,9 @@ export default function Home() {
 
       if ((e.code === "Delete" || e.code === "Backspace") && selectedClipId) {
         e.preventDefault();
-        setClips((prev) => prev.filter((clip) => clip.id !== selectedClipId));
+        // record history and sync ClipsData exactly like the toolbar delete does.
+        handleDeleteClip(selectedClipId);
+        // clear selection (handleDeleteClip already clears selection, but keep this for safety)
         setSelectedClipId(null);
       }
     };
@@ -918,7 +1161,13 @@ export default function Home() {
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [currentTime, totalDuration, selectedClipId, handlePlayPause]);
+  }, [
+    currentTime,
+    totalDuration,
+    selectedClipId,
+    handlePlayPause,
+    handleDeleteClip,
+  ]);
 
   const autoReflowClips = (inputClips) => {
     const sorted = [...inputClips]
@@ -1072,10 +1321,6 @@ export default function Home() {
   // - REPLACES current clips so default-clip does not show when external data exists
   // -----------------------
 
-  // Robust universal media duration probe that:
-  //  - tries without crossOrigin first (most servers)
-  //  - retries with crossOrigin only if needed
-  //  - attaches listeners before assigning src (safer)
   const getRemoteMediaDuration = (
     url,
     type = "audio",
@@ -1397,10 +1642,8 @@ export default function Home() {
     if (!newClips.length) return;
 
     // replace app clips state (assumes setClips + fixAudioTrackLayers exist in your file)
-    setClips(() => {
-      const marked = newClips.map((c) => ({ ...c, externalSource: true }));
-      return fixAudioTrackLayers(marked);
-    });
+    const marked = newClips.map((c) => ({ ...c, externalSource: true }));
+    updateClips(fixAudioTrackLayers(marked));
 
     // ensure selection and totalDuration update after setClips
     setTimeout(() => {
@@ -1428,7 +1671,6 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once
 
   // -----------------------
@@ -1439,26 +1681,18 @@ export default function Home() {
   // *** ADDED HANDLERS (minimal)
   // =========================
 
-  // Delete handler (used by toolbar)
-  const handleDeleteClip = useCallback(
-    (clipId) => {
-      setClips((prev) => prev.filter((c) => c.id !== clipId));
-      setSelectedClipId((cur) => (cur === clipId ? null : cur));
-    },
-    [setClips]
-  );
-
   // Per-clip volume setter (0..1)
   const handleChangeVolume = useCallback(
     (clipId, newVolume) => {
       const v = Number(newVolume);
       const clamped = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
-      setClips((prev) =>
-        prev.map((c) => (c.id === clipId ? { ...c, volume: clamped } : c))
+      updateClips(
+        (clipsRef.current || []).map((c) =>
+          c.id === clipId ? { ...c, volume: clamped } : c
+        )
       );
-      // If you manage audio via WebAudio, make sure AudioPlayer picks up / applies clip.volume
     },
-    [setClips]
+    [updateClips]
   );
 
   // Per-clip playback speed setter (video)
@@ -1466,11 +1700,13 @@ export default function Home() {
     (clipId, newRate) => {
       const r = Number(newRate);
       const clamped = Number.isFinite(r) ? Math.max(0.25, Math.min(4, r)) : 1;
-      setClips((prev) =>
-        prev.map((c) => (c.id === clipId ? { ...c, playbackRate: clamped } : c))
+      updateClips(
+        (clipsRef.current || []).map((c) =>
+          c.id === clipId ? { ...c, playbackRate: clamped } : c
+        )
       );
     },
-    [setClips]
+    [updateClips]
   );
 
   // =========================
@@ -1479,13 +1715,13 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans flex flex-col items-center justify-center">
-      <div className="container mx-auto px-6 py-6 space-y-6">
+      <div className="max-w-[80rem] mx-auto px-6 py-6">
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold text-indigo-600">Video Editor</h1>
           <MediaUploader onMediaUpload={handleMediaUpload} />
         </div>
 
-        <div className="p-4">
+        <div className="">
           <VideoPlayer
             currentClip={getCurrentClip()}
             currentTime={currentTime}
@@ -1498,6 +1734,39 @@ export default function Home() {
             zoom={videoZoom}
             onRequestSeek={handleSeek}
           />
+        </div>
+        <div className="mt-3 flex items-center gap-3 px-3 py-2 rounded-lg bg-white shadow border border-gray-200 w-fit">
+          {/* Undo */}
+          <button
+            onClick={undo}
+            disabled={!canUndo}
+            className={`
+      p-2 rounded-md border transition cursor-pointer
+      ${
+        !canUndo
+          ? "opacity-40 cursor-not-allowed border-gray-200"
+          : "hover:bg-gray-100 border-gray-300"
+      }
+    `}
+          >
+            <img src="/icons/undo.png" alt="Undo" className="w-5 h-5" />
+          </button>
+
+          {/* Redo */}
+          <button
+            onClick={redo}
+            disabled={!canRedo}
+            className={`
+      p-2 rounded-md border transition cursor-pointer
+      ${
+        !canRedo
+          ? "opacity-40 cursor-not-allowed border-gray-200"
+          : "hover:bg-gray-100 border-gray-300"
+      }
+    `}
+          >
+            <img src="/icons/redo.png" alt="Redo" className="w-5 h-5" />
+          </button>
         </div>
 
         <div className="p-4">
@@ -1513,7 +1782,6 @@ export default function Home() {
             selectedClipId={selectedClipId}
             onAutoLayerFix={handleAutoLayerFix}
             onCommitMove={commitMoveAndSync}
-            // *** ADDED: toolbar action props so Timeline's ClipToolbar can call back
             onDelete={handleDeleteClip} // Delete button
             onChangeVolume={handleChangeVolume} // Volume slider
             onChangeSpeed={handleChangeSpeed} // Speed selector (video)
