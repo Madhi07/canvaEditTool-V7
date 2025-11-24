@@ -314,7 +314,7 @@ export default function Timeline({
 
   const handleClipMouseDown = (e, clip, type) => {
     // left-click: keep existing behavior (selection + drag start)
-    // if toolbar is visible, hide it on left-click 
+    // if toolbar is visible, hide it on left-click
     if (toolbarVisible) {
       // left click should close toolbar
       hideToolbar();
@@ -356,6 +356,10 @@ export default function Timeline({
       if (dragType === "move") {
         let newStartTime = startSnapshotTime + deltaTime;
         const clipDuration = endSnapshotTime - startSnapshotTime;
+
+        if (clip.type === "audio") {
+          newStartTime = Math.max(0, newStartTime);
+        }
 
         onClipUpdate(clip.id, {
           startTime: newStartTime,

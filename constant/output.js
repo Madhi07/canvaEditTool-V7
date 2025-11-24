@@ -6,27 +6,27 @@ export default ClipsData =[
     "status": "asset_generation_completed",
     "slides": [
       {
-        "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
+        "uuid": "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
         "slide_number": 1,
-        "subtitle": "Meet the Star",
-        "explain_text": "Here's our star: a playful dog. He's ready for his close-up.",
+        "subtitle": "Sunglasses On",
+        "explain_text": "Time to accessorize! The dog wears cool sunglasses.",
         "image": {
-          "uuid": "430f7b28-54b3-4f67-94a3-d207232c0d45",
-          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
-          "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
+          "uuid": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
+          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/d43c608f-acb1-493d-9f8c-32ac47c5e659/65c0818b-fe0a-42fe-b4f3-2f4cc4424a24.png",
+          "image_prompt": "The dog wearing trendy sunglasses, looking chic and confident.",
           "asset_type": "ai_generated",
           "status": "success",
-          "image_duration": 2.47
+          "image_duration": 6.74
         },
         "audio": {
-          "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
-          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/796cd29b-9221-43f4-8576-bb5661797960/audio/a9a6c19c-02ed-49a1-a821-8ed4c54de5ba.mp3",
-          "audio_prompt": "Meet our adorable star for today, a playful pup who's absolutely ready for his close-up moment.",
+          "uuid": "29c7b149-d9a6-4257-9f96-4164c0938cdb",
+          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/29c7b149-d9a6-4257-9f96-4164c0938cdb/audio/d9fc5f7f-883f-4bb1-9efe-8797685329f2.mp3",
+          "audio_prompt": "It's time for some stylish accessorizing. Watch as our cute pup dons a pair of ultra-cool sunglasses.",
           "status": "success",
-          "duration": 6.64
+          "duration": 6.92
         },
-        "image_id": "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
-        "audio_id": "796cd29b-9221-43f4-8576-bb5661797960"
+        "image_id": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
+        "audio_id": "29c7b149-d9a6-4257-9f96-4164c0938cdb"
       },
       {
         "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
@@ -39,76 +39,7 @@ export default ClipsData =[
           "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
           "asset_type": "ai_generated",
           "status": "success",
-          "image_duration": 0.84
-        },
-        "audio": {
-          "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
-          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/796cd29b-9221-43f4-8576-bb5661797960/audio/a9a6c19c-02ed-49a1-a821-8ed4c54de5ba.mp3",
-          "audio_prompt": "Meet our adorable star for today, a playful pup who's absolutely ready for his close-up moment.",
-          "status": "success",
-          "duration": 6.64
-        },
-        "image_id": "d6a16ad4-12b3-4086-b1d9-aae3a20787e8",
-        "audio_id": "796cd29b-9221-43f4-8576-bb5661797960"
-      },
-      {
-        "uuid": "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
-        "slide_number": 3,
-        "subtitle": "Sunglasses On",
-        "explain_text": "Time to accessorize! The dog wears cool sunglasses.",
-        "image": {
-          "uuid": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
-          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/d43c608f-acb1-493d-9f8c-32ac47c5e659/65c0818b-fe0a-42fe-b4f3-2f4cc4424a24.png",
-          "image_prompt": "The dog wearing trendy sunglasses, looking chic and confident.",
-          "asset_type": "ai_generated",
-          "status": "success",
-          "image_duration": 1.57
-        },
-        "audio": {
-          "uuid": "29c7b149-d9a6-4257-9f96-4164c0938cdb",
-          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/29c7b149-d9a6-4257-9f96-4164c0938cdb/audio/d9fc5f7f-883f-4bb1-9efe-8797685329f2.mp3",
-          "audio_prompt": "It's time for some stylish accessorizing. Watch as our cute pup dons a pair of ultra-cool sunglasses.",
-          "status": "success",
-          "duration": 6.92
-        },
-        "image_id": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
-        "audio_id": "29c7b149-d9a6-4257-9f96-4164c0938cdb"
-      },
-      {
-        "uuid": "5a8584bd-de05-4a2d-a0cb-b5f6d1864478",
-        "slide_number": 4,
-        "subtitle": "Sunglasses On",
-        "explain_text": "Time to accessorize! The dog wears cool sunglasses.",
-        "image": {
-          "uuid": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
-          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/d43c608f-acb1-493d-9f8c-32ac47c5e659/65c0818b-fe0a-42fe-b4f3-2f4cc4424a24.png",
-          "image_prompt": "The dog wearing trendy sunglasses, looking chic and confident.",
-          "asset_type": "ai_generated",
-          "status": "success",
-          "image_duration": 4.17
-        },
-        "audio": {
-          "uuid": "29c7b149-d9a6-4257-9f96-4164c0938cdb",
-          "audio_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/29c7b149-d9a6-4257-9f96-4164c0938cdb/audio/d9fc5f7f-883f-4bb1-9efe-8797685329f2.mp3",
-          "audio_prompt": "It's time for some stylish accessorizing. Watch as our cute pup dons a pair of ultra-cool sunglasses.",
-          "status": "success",
-          "duration": 6.92
-        },
-        "image_id": "d43c608f-acb1-493d-9f8c-32ac47c5e659",
-        "audio_id": "29c7b149-d9a6-4257-9f96-4164c0938cdb"
-      },
-      {
-        "uuid": "1da2db17-fed2-46d5-87c7-126558990208",
-        "slide_number": 5,
-        "subtitle": "Meet the Star",
-        "explain_text": "Here's our star: a playful dog. He's ready for his close-up.",
-        "image": {
-          "uuid": "430f7b28-54b3-4f67-94a3-d207232c0d45",
-          "image_url": "https://agentzee-media-agent.s3.ap-south-1.amazonaws.com/reels/63655cfa-cea1-46d7-bec8-defe1cf1e98b/5a6aa1ec-efed-4f3a-bec7-a96892c148c0.png",
-          "image_prompt": "The dog posing like a model, front paws forward and head slightly tilted.",
-          "asset_type": "ai_generated",
-          "status": "success",
-          "image_duration": 2.69
+          "image_duration": 6
         },
         "audio": {
           "uuid": "796cd29b-9221-43f4-8576-bb5661797960",
@@ -122,7 +53,7 @@ export default ClipsData =[
       },
       {
         "uuid": "fb6a0dd2-ae62-4bf8-a200-040da423ec17",
-        "slide_number": 6,
+        "slide_number": 3,
         "subtitle": "Strike a Pose",
         "explain_text": "The dog strikes a pose. Snap that picture!",
         "video": {
@@ -145,7 +76,7 @@ export default ClipsData =[
       },
       {
         "uuid": "a7057bb7-5dfc-49d5-8c97-a72964dc035e",
-        "slide_number": 7,
+        "slide_number": 4,
         "subtitle": "Capture the Moment",
         "explain_text": "Capture this fun moment. A polaroid is taken.",
         "image": {
@@ -168,7 +99,7 @@ export default ClipsData =[
       },
       {
         "uuid": "b2c8b017-c81d-4bd7-a6e8-c60427a89750",
-        "slide_number": 8,
+        "slide_number": 5,
         "subtitle": "The Polaroid Shot",
         "explain_text": "Here's the polaroid! A perfect portrait.",
         "image": {
@@ -190,7 +121,7 @@ export default ClipsData =[
       },
       {
         "uuid": "23e02c30-fcc5-474b-a548-0d6f2f169acc",
-        "slide_number": 9,
+        "slide_number": 6,
         "subtitle": "Stylish Memories",
         "explain_text": "What a stylish memory! Share with friends.",
         "image": {
